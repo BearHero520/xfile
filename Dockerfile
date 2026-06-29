@@ -5,9 +5,10 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM golang:1.22-alpine AS api-builder
+FROM golang:1.24-alpine AS api-builder
 WORKDIR /src
 COPY go.mod ./
+RUN go mod download
 COPY cmd/ ./cmd/
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/xfile ./cmd/xfile
 

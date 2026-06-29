@@ -8,5 +8,9 @@ services:
     environment:
       XFILE_PORT: "3008"
       XFILE_DATA_DIR: /app/data
+      XFILE_DB_PATH: /app/data/xfile.db
+      XFILE_ADMIN_USER: ${XFILE_ADMIN_USER:-admin}
+      XFILE_ADMIN_PASSWORD: ${XFILE_ADMIN_PASSWORD:-xfile-admin}
+      XFILE_TRUST_PROXY: ${XFILE_TRUST_PROXY:-false}
     volumes:
       - ./data:/app/data

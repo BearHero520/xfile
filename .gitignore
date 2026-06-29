@@ -1,0 +1,9 @@
+data/
+web/dist/
+web/node_modules/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+.env
+*.exe
+*.log

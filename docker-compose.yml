@@ -1,0 +1,12 @@
+services:
+  xfile:
+    image: ghcr.io/${GHCR_OWNER:-your-github-username}/xfile:latest
+    container_name: xfile
+    restart: unless-stopped
+    ports:
+      - "3008:3008"
+    environment:
+      XFILE_PORT: "3008"
+      XFILE_DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data

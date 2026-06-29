@@ -1,27 +1,34 @@
-FROM node:22-alpine AS web-builder
+FROM node:22-alpine AS web
 WORKDIR /src/web
-COPY web/package*.json ./
-RUN npm ci
-COPY web/ ./
-RUN npm run build
+RUN corepack enable
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web/index.html web/tsconfig.json web/vite.config.ts web/uno.config.ts web/eslint.config.js ./
+COPY web/public ./public
+COPY web/src ./src
+RUN pnpm build
 
-FROM golang:1.24-alpine AS api-builder
+FROM golang:1.22-alpine AS api
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum* ./
 RUN go mod download
-COPY cmd/ ./cmd/
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/xfile ./cmd/xfile
+COPY internal ./internal
+COPY main.go ./
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/xfile .
 
-FROM alpine:3.20
+FROM debian:bookworm-slim
 WORKDIR /app
-RUN addgroup -S xfile && adduser -S xfile -G xfile
-COPY --from=api-builder /out/xfile /app/xfile
-COPY --from=web-builder /src/web/dist /app/web/dist
-RUN mkdir -p /app/data/files && chown -R xfile:xfile /app
-USER xfile
-ENV XFILE_PORT=3008
-ENV XFILE_DATA_DIR=/app/data
-ENV XFILE_WEB_DIR=/app/web/dist
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=api /out/xfile /app/xfile
+COPY --from=web /src/web/dist /app/web/dist
+ENV XFILE_ADDR=:3008 \
+  XFILE_DATA_DIR=/app/data \
+  XFILE_FILES_DIR=/app/data/files \
+  XFILE_DB=/app/data/xfile.db \
+  XFILE_STATIC_DIR=/app/web/dist \
+  XFILE_SESSION_SECRET=
 EXPOSE 3008
 VOLUME ["/app/data"]
-ENTRYPOINT ["/app/xfile"]
+CMD ["/app/xfile"]

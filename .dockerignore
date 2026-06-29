@@ -1,7 +1,10 @@
 .git
-data
+.github
+.codex-run
+node_modules
 web/node_modules
+dist
 web/dist
+data
 *.log
-README.md
-docker-compose.yml
+*.local

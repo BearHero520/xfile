@@ -1,16 +1,12 @@
 services:
   xfile:
-    image: ghcr.io/${GHCR_OWNER:-your-github-username}/xfile:latest
-    container_name: xfile
-    restart: unless-stopped
+    build: .
+    image: xfile:local
     ports:
       - "3008:3008"
     environment:
-      XFILE_PORT: "3008"
-      XFILE_DATA_DIR: /app/data
-      XFILE_DB_PATH: /app/data/xfile.db
-      XFILE_ADMIN_USER: ${XFILE_ADMIN_USER:-admin}
-      XFILE_ADMIN_PASSWORD: ${XFILE_ADMIN_PASSWORD:-xfile-admin}
-      XFILE_TRUST_PROXY: ${XFILE_TRUST_PROXY:-false}
+      XFILE_SITE_NAME: XFile
+      XFILE_ADMIN_PASSWORD: ${XFILE_ADMIN_PASSWORD:?set XFILE_ADMIN_PASSWORD before starting}
+      XFILE_SESSION_SECRET: ${XFILE_SESSION_SECRET:-}
     volumes:
       - ./data:/app/data

@@ -1,19 +1,28 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"encoding/xml"
 	"errors"
+	"io"
 	"io/fs"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"golang.org/x/crypto/bcrypt"
 	"xfile/internal/config"
 	"xfile/internal/domain"
@@ -22,6 +31,70 @@ import (
 type Store struct {
 	db  *sql.DB
 	cfg config.Config
+}
+
+type readSeekCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+}
+
+type sourceDownload struct {
+	Entry  domain.FileEntry
+	Reader readSeekCloser
+}
+
+type tempReadSeekCloser struct {
+	*os.File
+	path string
+}
+
+func (t tempReadSeekCloser) Close() error {
+	err := t.File.Close()
+	_ = os.Remove(t.path)
+	return err
+}
+
+type s3SourceConfig struct {
+	Endpoint  string `json:"endpoint"`
+	Bucket    string `json:"bucket"`
+	Region    string `json:"region"`
+	AccessKey string `json:"accessKey"`
+	SecretKey string `json:"secretKey"`
+	Prefix    string `json:"prefix"`
+	Secure    bool   `json:"secure"`
+}
+
+type webDAVSourceConfig struct {
+	URL      string `json:"url"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Root     string `json:"root"`
+}
+
+type davMultiStatus struct {
+	Responses []davResponse `xml:"response"`
+}
+
+type davResponse struct {
+	Href     string        `xml:"href"`
+	PropStat []davPropStat `xml:"propstat"`
+	Status   string        `xml:"status"`
+}
+
+type davPropStat struct {
+	Prop   davProp `xml:"prop"`
+	Status string  `xml:"status"`
+}
+
+type davProp struct {
+	ResourceType davResourceType `xml:"resourcetype"`
+	Length       string          `xml:"getcontentlength"`
+	Modified     string          `xml:"getlastmodified"`
+}
+
+type davResourceType struct {
+	Collection *struct{} `xml:"collection"`
 }
 
 func New(db *sql.DB, cfg config.Config) *Store {
@@ -60,8 +133,8 @@ func (s *Store) ensureDefaultStorageSources() error {
 		{name: "腾讯云 COS", key: "tencent", sourceType: "tencent_cos", public: 0, enabled: 0},
 	}
 	for index, source := range defaults {
-		if _, err := s.db.Exec(`INSERT INTO storage_sources(name, key, type, root_path, public, enabled, order_num)
-			VALUES(?, ?, ?, ?, ?, ?, ?)`, source.name, source.key, source.sourceType, source.root, source.public, source.enabled, index); err != nil {
+		if _, err := s.db.Exec(`INSERT INTO storage_sources(name, key, type, root_path, hidden_paths, blocked_paths, public, enabled, order_num)
+			VALUES(?, ?, ?, ?, '', '', ?, ?, ?)`, source.name, source.key, source.sourceType, source.root, source.public, source.enabled, index); err != nil {
 			return err
 		}
 	}
@@ -331,7 +404,7 @@ func (s *Store) PublicSite(loggedIn bool) (domain.PublicSite, error) {
 }
 
 func (s *Store) StorageSources(publicOnly bool) ([]domain.StorageSource, error) {
-	query := `SELECT id, name, key, type, root_path, public, enabled, order_num, created_at FROM storage_sources`
+	query := `SELECT id, name, key, type, root_path, hidden_paths, blocked_paths, public, enabled, order_num, created_at FROM storage_sources`
 	if publicOnly {
 		query += ` WHERE public = 1 AND enabled = 1`
 	}
@@ -348,6 +421,11 @@ func (s *Store) StorageSources(publicOnly bool) ([]domain.StorageSource, error) 
 		if err != nil {
 			return nil, err
 		}
+		if publicOnly {
+			source.RootPath = ""
+			source.HiddenPaths = ""
+			source.BlockedPaths = ""
+		}
 		sources = append(sources, source)
 	}
 	return sources, rows.Err()
@@ -358,7 +436,7 @@ func (s *Store) StorageSource(key string) (domain.StorageSource, error) {
 	if key == "" {
 		return domain.StorageSource{}, errors.New("storage source key is required")
 	}
-	row := s.db.QueryRow(`SELECT id, name, key, type, root_path, public, enabled, order_num, created_at FROM storage_sources WHERE key = ?`, key)
+	row := s.db.QueryRow(`SELECT id, name, key, type, root_path, hidden_paths, blocked_paths, public, enabled, order_num, created_at FROM storage_sources WHERE key = ?`, key)
 	return scanStorageSource(row)
 }
 
@@ -367,12 +445,14 @@ func (s *Store) CreateStorageSource(input domain.StorageSourceInput) (domain.Sto
 	if err != nil {
 		return domain.StorageSource{}, err
 	}
-	res, err := s.db.Exec(`INSERT INTO storage_sources(name, key, type, root_path, public, enabled, order_num)
-		VALUES(?, ?, ?, ?, ?, ?, ?)`,
+	res, err := s.db.Exec(`INSERT INTO storage_sources(name, key, type, root_path, hidden_paths, blocked_paths, public, enabled, order_num)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		normalized.Name,
 		normalized.Key,
 		normalized.Type,
 		normalized.RootPath,
+		normalized.HiddenPaths,
+		normalized.BlockedPaths,
 		boolInt(normalized.Public),
 		boolInt(normalized.Enabled),
 		normalized.OrderNum,
@@ -393,12 +473,14 @@ func (s *Store) UpdateStorageSource(id int64, input domain.StorageSourceInput) (
 		return domain.StorageSource{}, err
 	}
 	res, err := s.db.Exec(`UPDATE storage_sources
-		SET name = ?, key = ?, type = ?, root_path = ?, public = ?, enabled = ?, order_num = ?, updated_at = CURRENT_TIMESTAMP
+		SET name = ?, key = ?, type = ?, root_path = ?, hidden_paths = ?, blocked_paths = ?, public = ?, enabled = ?, order_num = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`,
 		normalized.Name,
 		normalized.Key,
 		normalized.Type,
 		normalized.RootPath,
+		normalized.HiddenPaths,
+		normalized.BlockedPaths,
 		boolInt(normalized.Public),
 		boolInt(normalized.Enabled),
 		normalized.OrderNum,
@@ -421,13 +503,6 @@ func (s *Store) DeleteStorageSource(id int64) error {
 	if id < 1 {
 		return errors.New("invalid storage source id")
 	}
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM storage_sources`).Scan(&count); err != nil {
-		return err
-	}
-	if count <= 1 {
-		return errors.New("at least one storage source is required")
-	}
 	res, err := s.db.Exec(`DELETE FROM storage_sources WHERE id = ?`, id)
 	if err != nil {
 		return err
@@ -443,7 +518,7 @@ func (s *Store) DeleteStorageSource(id int64) error {
 }
 
 func (s *Store) storageSourceByID(id int64) (domain.StorageSource, error) {
-	row := s.db.QueryRow(`SELECT id, name, key, type, root_path, public, enabled, order_num, created_at FROM storage_sources WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, name, key, type, root_path, hidden_paths, blocked_paths, public, enabled, order_num, created_at FROM storage_sources WHERE id = ?`, id)
 	return scanStorageSource(row)
 }
 
@@ -452,6 +527,8 @@ func (s *Store) normalizeStorageSourceInput(input domain.StorageSourceInput, cur
 	input.Key = strings.TrimSpace(input.Key)
 	input.Type = strings.TrimSpace(input.Type)
 	input.RootPath = strings.TrimSpace(input.RootPath)
+	input.HiddenPaths = normalizePathRulesText(input.HiddenPaths)
+	input.BlockedPaths = normalizePathRulesText(input.BlockedPaths)
 	if input.Name == "" {
 		return domain.StorageSourceInput{}, errors.New("storage source name is required")
 	}
@@ -469,14 +546,32 @@ func (s *Store) normalizeStorageSourceInput(input domain.StorageSourceInput, cur
 	if err == nil && existingID != currentID {
 		return domain.StorageSourceInput{}, errors.New("storage source key already exists")
 	}
-	if input.Type == "local" {
+	switch input.Type {
+	case "local":
 		if input.RootPath == "" {
 			input.RootPath = s.cfg.FilesDir
 		}
 		if err := os.MkdirAll(input.RootPath, 0o755); err != nil {
 			return domain.StorageSourceInput{}, err
 		}
-	} else if input.Enabled {
+	case "s3", "aliyun_oss", "tencent_cos":
+		normalizedConfig, err := normalizeS3SourceConfig(input.RootPath, input.Enabled)
+		if err != nil {
+			return domain.StorageSourceInput{}, err
+		}
+		input.RootPath = normalizedConfig
+	case "webdav":
+		normalizedConfig, err := normalizeWebDAVSourceConfig(input.RootPath, input.Enabled)
+		if err != nil {
+			return domain.StorageSourceInput{}, err
+		}
+		input.RootPath = normalizedConfig
+	default:
+		if input.Enabled {
+			return domain.StorageSourceInput{}, errors.New("storage adapter is not implemented yet")
+		}
+	}
+	if !storageTypeReady(input.Type) && input.Enabled {
 		return domain.StorageSourceInput{}, errors.New("storage adapter is not implemented yet")
 	}
 	return input, nil
@@ -489,7 +584,7 @@ type storageSourceScanner interface {
 func scanStorageSource(row storageSourceScanner) (domain.StorageSource, error) {
 	var source domain.StorageSource
 	var public, enabled int
-	if err := row.Scan(&source.ID, &source.Name, &source.Key, &source.Type, &source.RootPath, &public, &enabled, &source.OrderNum, &source.CreatedAt); err != nil {
+	if err := row.Scan(&source.ID, &source.Name, &source.Key, &source.Type, &source.RootPath, &source.HiddenPaths, &source.BlockedPaths, &public, &enabled, &source.OrderNum, &source.CreatedAt); err != nil {
 		return domain.StorageSource{}, err
 	}
 	source.Public = public == 1
@@ -502,68 +597,142 @@ func scanStorageSource(row storageSourceScanner) (domain.StorageSource, error) {
 }
 
 func (s *Store) ListSourceFiles(storageKey, rel string, publicOnly bool) ([]domain.FileEntry, error) {
-	source, err := s.StorageSource(storageKey)
+	source, err := s.availableSource(storageKey, publicOnly)
 	if err != nil {
 		return nil, err
 	}
-	if !source.Enabled || (publicOnly && !source.Public) {
-		return nil, errors.New("storage source is not available")
+	if publicOnly && s.IsSourceBlockedPath(source, rel) {
+		return nil, errors.New("path is blocked")
 	}
-	root, err := s.sourceSafePath(source, rel)
+	if objectStorageType(source.Type) {
+		return s.listS3Files(source, rel, publicOnly)
+	}
+	if source.Type == "webdav" {
+		return s.listWebDAVFiles(source, rel, publicOnly)
+	}
+	_, root, err := s.sourceRoot(storageKey, publicOnly)
 	if err != nil {
 		return nil, err
 	}
-	infos, err := os.ReadDir(root)
+	files, err := s.listFilesInRoot(root, rel)
 	if err != nil {
 		return nil, err
 	}
-	files := make([]domain.FileEntry, 0, len(infos))
-	for _, entry := range infos {
-		info, err := entry.Info()
-		if err != nil {
-			return nil, err
-		}
-		entryType := "file"
-		size := info.Size()
-		if entry.IsDir() {
-			entryType = "folder"
-			size = 0
-		}
-		item := domain.FileEntry{
-			Name:       entry.Name(),
-			Path:       cleanJoin(rel, entry.Name()),
-			Type:       entryType,
-			Size:       size,
-			ModifiedAt: info.ModTime().Format(time.RFC3339),
-		}
-		if !publicOnly || !s.IsPrivatePath(item.Path) {
-			files = append(files, item)
-		}
+	if publicOnly {
+		files = s.filterSourcePublicFiles(source, files)
 	}
 	return files, nil
 }
 
 func (s *Store) SourceFilePath(storageKey, rel string, publicOnly bool) (string, error) {
-	source, err := s.StorageSource(storageKey)
+	source, err := s.availableSource(storageKey, publicOnly)
 	if err != nil {
 		return "", err
 	}
-	if !source.Enabled || (publicOnly && !source.Public) {
-		return "", errors.New("storage source is not available")
+	if source.Type != "local" {
+		return "", errors.New("storage source does not expose a local file path")
 	}
-	if publicOnly && s.IsPrivatePath(rel) {
-		return "", errors.New("path is private")
+	if publicOnly && s.IsSourceBlockedPath(source, rel) {
+		return "", errors.New("path is blocked")
 	}
 	return s.sourceSafePath(source, rel)
 }
 
+func (s *Store) SourceDownload(storageKey, rel string, publicOnly bool) (sourceDownload, error) {
+	source, err := s.availableSource(storageKey, publicOnly)
+	if err != nil {
+		return sourceDownload{}, err
+	}
+	if publicOnly && s.IsSourceBlockedPath(source, rel) {
+		return sourceDownload{}, errors.New("path is blocked")
+	}
+	switch source.Type {
+	case "local":
+		path, err := s.sourceSafePath(source, rel)
+		if err != nil {
+			return sourceDownload{}, err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return sourceDownload{}, err
+		}
+		if info.IsDir() {
+			return sourceDownload{}, errors.New("folder download is not implemented yet")
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return sourceDownload{}, err
+		}
+		return sourceDownload{Entry: fileInfoEntry(rel, info), Reader: file}, nil
+	case "s3":
+		return s.s3Download(source, rel)
+	case "aliyun_oss", "tencent_cos":
+		return s.s3Download(source, rel)
+	case "webdav":
+		return s.webDAVDownload(source, rel)
+	default:
+		return sourceDownload{}, errors.New("storage adapter is not implemented yet")
+	}
+}
+
+func (s *Store) sourceRoot(storageKey string, publicOnly bool) (domain.StorageSource, string, error) {
+	source, err := s.availableSource(storageKey, publicOnly)
+	if err != nil {
+		return domain.StorageSource{}, "", err
+	}
+	if source.Type != "local" {
+		return domain.StorageSource{}, "", errors.New("storage source does not expose a local root")
+	}
+	root, err := s.sourceSafePath(source, "")
+	if err != nil {
+		return domain.StorageSource{}, "", err
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return domain.StorageSource{}, "", err
+	}
+	return source, root, nil
+}
+
+func (s *Store) availableSource(storageKey string, publicOnly bool) (domain.StorageSource, error) {
+	source, err := s.StorageSource(storageKey)
+	if err != nil {
+		return domain.StorageSource{}, err
+	}
+	if !source.Enabled || (publicOnly && !source.Public) {
+		return domain.StorageSource{}, errors.New("storage source is not available")
+	}
+	return source, nil
+}
+
 func (s *Store) UploadAllowed(dirRel, filename string) error {
+	return s.uploadAllowedInRoot(s.cfg.FilesDir, dirRel, filename)
+}
+
+func (s *Store) SourceUploadAllowed(storageKey, dirRel, filename string) error {
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return err
+	}
+	if objectStorageType(source.Type) {
+		return s.s3UploadAllowed(source, dirRel, filename)
+	}
+	if source.Type == "webdav" {
+		return s.webDAVUploadAllowed(source, dirRel, filename)
+	}
+	_, root, err := s.sourceRoot(storageKey, false)
+	if err != nil {
+		return err
+	}
+	return s.uploadAllowedInRoot(root, dirRel, filename)
+}
+
+func (s *Store) uploadAllowedInRoot(root, dirRel, filename string) error {
 	filename = filepath.Base(filename)
 	if strings.TrimSpace(filename) == "" || filename == "." {
 		return errors.New("filename is required")
 	}
 	targetRel := cleanJoin(dirRel, filename)
-	if _, err := s.safePath(targetRel); err != nil {
+	if _, err := safePathInRoot(root, targetRel); err != nil {
 		return err
 	}
 
@@ -585,7 +754,7 @@ func (s *Store) UploadAllowed(dirRel, filename string) error {
 		return errors.New("file extension is not allowed")
 	}
 	if s.SettingValue("uploadOverwrite", "enabled") != "enabled" {
-		target, err := s.safePath(targetRel)
+		target, err := safePathInRoot(root, targetRel)
 		if err != nil {
 			return err
 		}
@@ -599,7 +768,33 @@ func (s *Store) UploadAllowed(dirRel, filename string) error {
 }
 
 func (s *Store) ListFiles(rel string) ([]domain.FileEntry, error) {
-	root, err := s.safePath(rel)
+	root, err := s.safePath("")
+	if err != nil {
+		return nil, err
+	}
+	return s.listFilesInRoot(root, rel)
+}
+
+func (s *Store) ListSourceFilesForAdmin(storageKey, rel string) ([]domain.FileEntry, error) {
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return nil, err
+	}
+	if objectStorageType(source.Type) {
+		return s.listS3Files(source, rel, false)
+	}
+	if source.Type == "webdav" {
+		return s.listWebDAVFiles(source, rel, false)
+	}
+	_, root, err := s.sourceRoot(storageKey, false)
+	if err != nil {
+		return nil, err
+	}
+	return s.listFilesInRoot(root, rel)
+}
+
+func (s *Store) listFilesInRoot(rootPath, rel string) ([]domain.FileEntry, error) {
+	root, err := safePathInRoot(rootPath, rel)
 	if err != nil {
 		return nil, err
 	}
@@ -631,6 +826,28 @@ func (s *Store) ListFiles(rel string) ([]domain.FileEntry, error) {
 }
 
 func (s *Store) SearchFiles(query string, limit int) ([]domain.FileEntry, error) {
+	return s.searchFilesInRoot(s.cfg.FilesDir, query, limit)
+}
+
+func (s *Store) SearchSourceFiles(storageKey, query string, limit int) ([]domain.FileEntry, error) {
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return nil, err
+	}
+	if objectStorageType(source.Type) {
+		return s.searchS3Files(source, query, limit)
+	}
+	if source.Type == "webdav" {
+		return s.searchWebDAVFiles(source, query, limit)
+	}
+	_, root, err := s.sourceRoot(storageKey, false)
+	if err != nil {
+		return nil, err
+	}
+	return s.searchFilesInRoot(root, query, limit)
+}
+
+func (s *Store) searchFilesInRoot(rootText, query string, limit int) ([]domain.FileEntry, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return []domain.FileEntry{}, nil
@@ -642,7 +859,7 @@ func (s *Store) SearchFiles(query string, limit int) ([]domain.FileEntry, error)
 		limit = 200
 	}
 
-	root, err := filepath.Abs(s.cfg.FilesDir)
+	root, err := filepath.Abs(rootText)
 	if err != nil {
 		return nil, err
 	}
@@ -695,8 +912,84 @@ func (s *Store) FilePath(rel string) (string, error) {
 	return s.safePath(rel)
 }
 
+func (s *Store) AdminSourceFilePath(storageKey, rel string) (string, error) {
+	_, root, err := s.sourceRoot(storageKey, false)
+	if err != nil {
+		return "", err
+	}
+	return safePathInRoot(root, rel)
+}
+
+func (s *Store) UploadSourceFile(storageKey, dirRel, filename string, reader io.Reader, size int64) (string, error) {
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return "", err
+	}
+	name := filepath.Base(filename)
+	if err := s.SourceUploadAllowed(storageKey, dirRel, name); err != nil {
+		return "", err
+	}
+	rel := cleanJoin(dirRel, name)
+	switch source.Type {
+	case "local":
+		root, err := s.sourceSafePath(source, "")
+		if err != nil {
+			return "", err
+		}
+		dir, err := safePathInRoot(root, dirRel)
+		if err != nil {
+			return "", err
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		target := filepath.Join(dir, name)
+		out, err := os.Create(target)
+		if err != nil {
+			return "", err
+		}
+		defer out.Close()
+		if _, err := io.Copy(out, reader); err != nil {
+			return "", err
+		}
+		return rel, nil
+	case "s3", "aliyun_oss", "tencent_cos":
+		return rel, s.putS3Object(source, rel, reader, size)
+	case "webdav":
+		return rel, s.putWebDAVFile(source, rel, reader)
+	default:
+		return "", errors.New("storage adapter is not implemented yet")
+	}
+}
+
 func (s *Store) CreateFolder(rel string) (domain.FileEntry, error) {
-	path, err := s.safePath(rel)
+	root, err := s.safePath("")
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	return s.createFolderInRoot(root, rel)
+}
+
+func (s *Store) CreateSourceFolder(storageKey, rel string) (domain.FileEntry, error) {
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if objectStorageType(source.Type) {
+		return s.createS3Folder(source, rel)
+	}
+	if source.Type == "webdav" {
+		return s.createWebDAVFolder(source, rel)
+	}
+	_, root, err := s.sourceRoot(storageKey, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	return s.createFolderInRoot(root, rel)
+}
+
+func (s *Store) createFolderInRoot(root, rel string) (domain.FileEntry, error) {
+	path, err := safePathInRoot(root, rel)
 	if err != nil {
 		return domain.FileEntry{}, err
 	}
@@ -720,6 +1013,32 @@ func (s *Store) CreateFolder(rel string) (domain.FileEntry, error) {
 }
 
 func (s *Store) CreateEmptyFile(rel string) (domain.FileEntry, error) {
+	root, err := s.safePath("")
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	return s.createEmptyFileInRoot(root, rel)
+}
+
+func (s *Store) CreateSourceEmptyFile(storageKey, rel string) (domain.FileEntry, error) {
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if objectStorageType(source.Type) {
+		return s.createS3EmptyFile(source, rel)
+	}
+	if source.Type == "webdav" {
+		return s.createWebDAVEmptyFile(source, rel)
+	}
+	_, root, err := s.sourceRoot(storageKey, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	return s.createEmptyFileInRoot(root, rel)
+}
+
+func (s *Store) createEmptyFileInRoot(root, rel string) (domain.FileEntry, error) {
 	rel = strings.TrimSpace(rel)
 	if rel == "" {
 		return domain.FileEntry{}, errors.New("file path is required")
@@ -732,10 +1051,10 @@ func (s *Store) CreateEmptyFile(rel string) (domain.FileEntry, error) {
 		dirRel = ""
 	}
 	name := filepath.Base(rel)
-	if err := s.UploadAllowed(dirRel, name); err != nil {
+	if err := s.uploadAllowedInRoot(root, dirRel, name); err != nil {
 		return domain.FileEntry{}, err
 	}
-	path, err := s.safePath(rel)
+	path, err := safePathInRoot(root, rel)
 	if err != nil {
 		return domain.FileEntry{}, err
 	}
@@ -763,11 +1082,37 @@ func (s *Store) CreateEmptyFile(rel string) (domain.FileEntry, error) {
 }
 
 func (s *Store) MoveFile(from, to string) (domain.FileEntry, error) {
-	source, err := s.safePath(from)
+	root, err := s.safePath("")
 	if err != nil {
 		return domain.FileEntry{}, err
 	}
-	target, err := s.safePath(to)
+	return s.moveFileInRoot(root, from, to)
+}
+
+func (s *Store) MoveSourceFile(storageKey, from, to string) (domain.FileEntry, error) {
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if objectStorageType(source.Type) {
+		return s.moveS3Object(source, from, to)
+	}
+	if source.Type == "webdav" {
+		return s.moveWebDAVPath(source, from, to)
+	}
+	_, root, err := s.sourceRoot(storageKey, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	return s.moveFileInRoot(root, from, to)
+}
+
+func (s *Store) moveFileInRoot(root, from, to string) (domain.FileEntry, error) {
+	source, err := safePathInRoot(root, from)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	target, err := safePathInRoot(root, to)
 	if err != nil {
 		return domain.FileEntry{}, err
 	}
@@ -806,15 +1151,41 @@ func (s *Store) MoveFile(from, to string) (domain.FileEntry, error) {
 }
 
 func (s *Store) DeleteFile(rel string) error {
-	path, err := s.safePath(rel)
+	root, err := s.safePath("")
 	if err != nil {
 		return err
 	}
-	root, err := filepath.Abs(s.cfg.FilesDir)
+	return s.deleteFileInRoot(root, rel)
+}
+
+func (s *Store) DeleteSourceFile(storageKey, rel string) error {
+	source, err := s.availableSource(storageKey, false)
 	if err != nil {
 		return err
 	}
-	if path == root {
+	if objectStorageType(source.Type) {
+		return s.deleteS3Object(source, rel)
+	}
+	if source.Type == "webdav" {
+		return s.deleteWebDAVPath(source, rel)
+	}
+	_, root, err := s.sourceRoot(storageKey, false)
+	if err != nil {
+		return err
+	}
+	return s.deleteFileInRoot(root, rel)
+}
+
+func (s *Store) deleteFileInRoot(root, rel string) error {
+	path, err := safePathInRoot(root, rel)
+	if err != nil {
+		return err
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	if path == absRoot {
 		return errors.New("refuse to delete storage root")
 	}
 	return os.RemoveAll(path)
@@ -1220,10 +1591,28 @@ func (s *Store) IsPrivatePath(rel string) bool {
 	return pathMatchesRules(rel, s.SettingValue("privatePathList", ""))
 }
 
+func (s *Store) IsSourceHiddenPath(source domain.StorageSource, rel string) bool {
+	return s.IsPrivatePath(rel) || pathMatchesRules(rel, source.HiddenPaths)
+}
+
+func (s *Store) IsSourceBlockedPath(source domain.StorageSource, rel string) bool {
+	return s.IsPrivatePath(rel) || pathMatchesRules(rel, source.BlockedPaths)
+}
+
 func (s *Store) filterPublicFiles(files []domain.FileEntry) []domain.FileEntry {
 	publicFiles := files[:0]
 	for _, file := range files {
 		if !s.IsPrivatePath(file.Path) {
+			publicFiles = append(publicFiles, file)
+		}
+	}
+	return publicFiles
+}
+
+func (s *Store) filterSourcePublicFiles(source domain.StorageSource, files []domain.FileEntry) []domain.FileEntry {
+	publicFiles := files[:0]
+	for _, file := range files {
+		if !s.IsSourceHiddenPath(source, file.Path) && !s.IsSourceBlockedPath(source, file.Path) {
 			publicFiles = append(publicFiles, file)
 		}
 	}
@@ -1292,6 +1681,14 @@ func splitPathRules(value string) []string {
 		}
 	}
 	return rules
+}
+
+func normalizePathRulesText(value string) string {
+	rules := splitPathRules(value)
+	if len(rules) == 0 {
+		return ""
+	}
+	return strings.Join(rules, "\n")
 }
 
 func extensionInList(ext, rulesText string) bool {
@@ -1365,27 +1762,865 @@ func storageSourceSummary(settings map[string]string) []string {
 	return sources
 }
 
+func storageTypeReady(sourceType string) bool {
+	return sourceType == "local" || sourceType == "webdav" || objectStorageType(sourceType)
+}
+
+func objectStorageType(sourceType string) bool {
+	return sourceType == "s3" || sourceType == "aliyun_oss" || sourceType == "tencent_cos"
+}
+
+func normalizeS3SourceConfig(raw string, enabled bool) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		if enabled {
+			return "", errors.New("S3 config is required")
+		}
+		return "", nil
+	}
+	var cfg s3SourceConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return "", errors.New("S3 config must be valid JSON")
+	}
+	cfg.Endpoint = strings.TrimSpace(cfg.Endpoint)
+	cfg.Bucket = strings.TrimSpace(cfg.Bucket)
+	cfg.Region = strings.TrimSpace(cfg.Region)
+	cfg.AccessKey = strings.TrimSpace(cfg.AccessKey)
+	cfg.SecretKey = strings.TrimSpace(cfg.SecretKey)
+	cfg.Prefix = strings.Trim(strings.TrimSpace(filepath.ToSlash(cfg.Prefix)), "/")
+	if parsed, err := url.Parse(cfg.Endpoint); err == nil && parsed.Host != "" {
+		cfg.Secure = parsed.Scheme == "https"
+		cfg.Endpoint = parsed.Host
+	}
+	if enabled && (cfg.Endpoint == "" || cfg.Bucket == "" || cfg.AccessKey == "" || cfg.SecretKey == "") {
+		return "", errors.New("S3 endpoint, bucket, access key, and secret key are required")
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func normalizeWebDAVSourceConfig(raw string, enabled bool) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		if enabled {
+			return "", errors.New("WebDAV config is required")
+		}
+		return "", nil
+	}
+	var cfg webDAVSourceConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return "", errors.New("WebDAV config must be valid JSON")
+	}
+	cfg.URL = strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
+	cfg.Username = strings.TrimSpace(cfg.Username)
+	cfg.Password = strings.TrimSpace(cfg.Password)
+	cfg.Root = strings.Trim(strings.TrimSpace(filepath.ToSlash(cfg.Root)), "/")
+	if enabled && cfg.URL == "" {
+		return "", errors.New("WebDAV URL is required")
+	}
+	if cfg.URL != "" {
+		parsed, err := url.Parse(cfg.URL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return "", errors.New("WebDAV URL is invalid")
+		}
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func s3ConfigFromSource(source domain.StorageSource) (s3SourceConfig, error) {
+	var cfg s3SourceConfig
+	if err := json.Unmarshal([]byte(source.RootPath), &cfg); err != nil {
+		return s3SourceConfig{}, errors.New("S3 config is invalid")
+	}
+	cfg.Endpoint = strings.TrimSpace(cfg.Endpoint)
+	cfg.Bucket = strings.TrimSpace(cfg.Bucket)
+	cfg.Region = strings.TrimSpace(cfg.Region)
+	cfg.AccessKey = strings.TrimSpace(cfg.AccessKey)
+	cfg.SecretKey = strings.TrimSpace(cfg.SecretKey)
+	cfg.Prefix = strings.Trim(strings.TrimSpace(filepath.ToSlash(cfg.Prefix)), "/")
+	if cfg.Endpoint == "" || cfg.Bucket == "" || cfg.AccessKey == "" || cfg.SecretKey == "" {
+		return s3SourceConfig{}, errors.New("S3 config is incomplete")
+	}
+	return cfg, nil
+}
+
+func webDAVConfigFromSource(source domain.StorageSource) (webDAVSourceConfig, error) {
+	var cfg webDAVSourceConfig
+	if err := json.Unmarshal([]byte(source.RootPath), &cfg); err != nil {
+		return webDAVSourceConfig{}, errors.New("WebDAV config is invalid")
+	}
+	cfg.URL = strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
+	cfg.Username = strings.TrimSpace(cfg.Username)
+	cfg.Password = strings.TrimSpace(cfg.Password)
+	cfg.Root = strings.Trim(strings.TrimSpace(filepath.ToSlash(cfg.Root)), "/")
+	if cfg.URL == "" {
+		return webDAVSourceConfig{}, errors.New("WebDAV config is incomplete")
+	}
+	return cfg, nil
+}
+
+func (s *Store) s3Client(source domain.StorageSource) (*minio.Client, s3SourceConfig, error) {
+	cfg, err := s3ConfigFromSource(source)
+	if err != nil {
+		return nil, s3SourceConfig{}, err
+	}
+	client, err := minio.New(cfg.Endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Secure: cfg.Secure,
+		Region: cfg.Region,
+	})
+	if err != nil {
+		return nil, s3SourceConfig{}, err
+	}
+	return client, cfg, nil
+}
+
+func s3ObjectKey(cfg s3SourceConfig, rel string) (string, error) {
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return "", err
+	}
+	return cleanJoin(cfg.Prefix, clean), nil
+}
+
+func s3ListPrefix(cfg s3SourceConfig, rel string) (string, error) {
+	key, err := s3ObjectKey(cfg, rel)
+	if err != nil {
+		return "", err
+	}
+	if key != "" && !strings.HasSuffix(key, "/") {
+		key += "/"
+	}
+	return key, nil
+}
+
+func s3EntryFromObject(cfg s3SourceConfig, object minio.ObjectInfo) domain.FileEntry {
+	key := strings.TrimPrefix(object.Key, strings.TrimSuffix(cfg.Prefix, "/"))
+	key = strings.TrimPrefix(key, "/")
+	entryType := "file"
+	size := object.Size
+	if strings.HasSuffix(key, "/") {
+		entryType = "folder"
+		size = 0
+		key = strings.TrimSuffix(key, "/")
+	}
+	name := pathBase(key)
+	return domain.FileEntry{
+		Name:       name,
+		Path:       key,
+		Type:       entryType,
+		Size:       size,
+		ModifiedAt: object.LastModified.Format(time.RFC3339),
+	}
+}
+
+func fileInfoEntry(rel string, info os.FileInfo) domain.FileEntry {
+	entryType := "file"
+	size := info.Size()
+	if info.IsDir() {
+		entryType = "folder"
+		size = 0
+	}
+	return domain.FileEntry{
+		Name:       filepath.Base(rel),
+		Path:       strings.Trim(filepath.ToSlash(rel), "/"),
+		Type:       entryType,
+		Size:       size,
+		ModifiedAt: info.ModTime().Format(time.RFC3339),
+	}
+}
+
+func pathBase(path string) string {
+	path = strings.Trim(strings.TrimSpace(filepath.ToSlash(path)), "/")
+	if path == "" {
+		return ""
+	}
+	parts := strings.Split(path, "/")
+	return parts[len(parts)-1]
+}
+
+func (s *Store) listS3Files(source domain.StorageSource, rel string, publicOnly bool) ([]domain.FileEntry, error) {
+	client, cfg, err := s.s3Client(source)
+	if err != nil {
+		return nil, err
+	}
+	prefix, err := s3ListPrefix(cfg, rel)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]domain.FileEntry, 0)
+	for object := range client.ListObjects(context.Background(), cfg.Bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: false}) {
+		if object.Err != nil {
+			return nil, object.Err
+		}
+		if object.Key == prefix {
+			continue
+		}
+		entry := s3EntryFromObject(cfg, object)
+		if entry.Path == "" {
+			continue
+		}
+		if !publicOnly || (!s.IsSourceHiddenPath(source, entry.Path) && !s.IsSourceBlockedPath(source, entry.Path)) {
+			files = append(files, entry)
+		}
+	}
+	return files, nil
+}
+
+func (s *Store) searchS3Files(source domain.StorageSource, query string, limit int) ([]domain.FileEntry, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []domain.FileEntry{}, nil
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	client, cfg, err := s.s3Client(source)
+	if err != nil {
+		return nil, err
+	}
+	prefix, err := s3ListPrefix(cfg, "")
+	if err != nil {
+		return nil, err
+	}
+	needle := strings.ToLower(query)
+	results := make([]domain.FileEntry, 0)
+	for object := range client.ListObjects(context.Background(), cfg.Bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if object.Err != nil {
+			return nil, object.Err
+		}
+		entry := s3EntryFromObject(cfg, object)
+		if entry.Path == "" || !strings.Contains(strings.ToLower(entry.Path), needle) {
+			continue
+		}
+		results = append(results, entry)
+		if len(results) >= limit {
+			break
+		}
+	}
+	return results, nil
+}
+
+func (s *Store) s3Download(source domain.StorageSource, rel string) (sourceDownload, error) {
+	client, cfg, err := s.s3Client(source)
+	if err != nil {
+		return sourceDownload{}, err
+	}
+	key, err := s3ObjectKey(cfg, rel)
+	if err != nil {
+		return sourceDownload{}, err
+	}
+	object, err := client.GetObject(context.Background(), cfg.Bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return sourceDownload{}, err
+	}
+	info, err := object.Stat()
+	if err != nil {
+		object.Close()
+		return sourceDownload{}, err
+	}
+	return sourceDownload{Entry: s3EntryFromObject(cfg, info), Reader: object}, nil
+}
+
+func (s *Store) s3UploadAllowed(source domain.StorageSource, dirRel, filename string) error {
+	filename = filepath.Base(filename)
+	if strings.TrimSpace(filename) == "" || filename == "." {
+		return errors.New("filename is required")
+	}
+	targetRel := cleanJoin(dirRel, filename)
+	if _, err := cleanRelative(targetRel); err != nil {
+		return err
+	}
+	if denyList := s.SettingValue("uploadPathDenyList", ""); pathMatchesRules(targetRel, denyList) {
+		return errors.New("upload path is denied")
+	}
+	if allowList := strings.TrimSpace(s.SettingValue("uploadPathAllowList", "")); allowList != "" && !pathMatchesRules(targetRel, allowList) {
+		return errors.New("upload path is not allowed")
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" {
+		ext = "(none)"
+	}
+	if extensionInList(ext, s.SettingValue("uploadDenyExtensions", "")) {
+		return errors.New("file extension is denied")
+	}
+	if allowList := strings.TrimSpace(s.SettingValue("uploadAllowExtensions", "")); allowList != "" && !extensionInList(ext, allowList) {
+		return errors.New("file extension is not allowed")
+	}
+	if s.SettingValue("uploadOverwrite", "enabled") == "enabled" {
+		return nil
+	}
+	client, cfg, err := s.s3Client(source)
+	if err != nil {
+		return err
+	}
+	key, err := s3ObjectKey(cfg, targetRel)
+	if err != nil {
+		return err
+	}
+	_, err = client.StatObject(context.Background(), cfg.Bucket, key, minio.StatObjectOptions{})
+	if err == nil {
+		return errors.New("target already exists")
+	}
+	response := minio.ToErrorResponse(err)
+	if response.Code == "NoSuchKey" || response.Code == "NotFound" {
+		return nil
+	}
+	return err
+}
+
+func (s *Store) putS3Object(source domain.StorageSource, rel string, reader io.Reader, size int64) error {
+	client, cfg, err := s.s3Client(source)
+	if err != nil {
+		return err
+	}
+	key, err := s3ObjectKey(cfg, rel)
+	if err != nil {
+		return err
+	}
+	_, err = client.PutObject(context.Background(), cfg.Bucket, key, reader, size, minio.PutObjectOptions{})
+	return err
+}
+
+func (s *Store) createS3Folder(source domain.StorageSource, rel string) (domain.FileEntry, error) {
+	rel = strings.Trim(strings.TrimSpace(filepath.ToSlash(rel)), "/")
+	if rel == "" {
+		return domain.FileEntry{}, errors.New("folder path is required")
+	}
+	folderRel, err := cleanRelative(rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if err := s.putS3Object(source, folderRel+"/", strings.NewReader(""), 0); err != nil {
+		return domain.FileEntry{}, err
+	}
+	now := time.Now().Format(time.RFC3339)
+	return domain.FileEntry{Name: pathBase(folderRel), Path: folderRel, Type: "folder", Size: 0, ModifiedAt: now}, nil
+}
+
+func (s *Store) createS3EmptyFile(source domain.StorageSource, rel string) (domain.FileEntry, error) {
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return domain.FileEntry{}, errors.New("file path is required")
+	}
+	if strings.HasSuffix(filepath.ToSlash(rel), "/") {
+		return domain.FileEntry{}, errors.New("file name is required")
+	}
+	dirRel := filepath.ToSlash(filepath.Dir(rel))
+	if dirRel == "." {
+		dirRel = ""
+	}
+	name := filepath.Base(rel)
+	if err := s.s3UploadAllowed(source, dirRel, name); err != nil {
+		return domain.FileEntry{}, err
+	}
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if err := s.putS3Object(source, clean, strings.NewReader(""), 0); err != nil {
+		return domain.FileEntry{}, err
+	}
+	now := time.Now().Format(time.RFC3339)
+	return domain.FileEntry{Name: pathBase(clean), Path: clean, Type: "file", Size: 0, ModifiedAt: now}, nil
+}
+
+func (s *Store) moveS3Object(source domain.StorageSource, from, to string) (domain.FileEntry, error) {
+	client, cfg, err := s.s3Client(source)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	fromKey, err := s3ObjectKey(cfg, from)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toClean, err := cleanRelative(to)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toKey, err := s3ObjectKey(cfg, toClean)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	info, err := client.StatObject(context.Background(), cfg.Bucket, fromKey, minio.StatObjectOptions{})
+	if err != nil {
+		return s.moveS3Prefix(client, cfg, from, to)
+	}
+	_, err = client.CopyObject(
+		context.Background(),
+		minio.CopyDestOptions{Bucket: cfg.Bucket, Object: toKey},
+		minio.CopySrcOptions{Bucket: cfg.Bucket, Object: fromKey},
+	)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if err := client.RemoveObject(context.Background(), cfg.Bucket, fromKey, minio.RemoveObjectOptions{}); err != nil {
+		return domain.FileEntry{}, err
+	}
+	info.Key = toKey
+	return s3EntryFromObject(cfg, info), nil
+}
+
+func (s *Store) moveS3Prefix(client *minio.Client, cfg s3SourceConfig, from, to string) (domain.FileEntry, error) {
+	fromPrefix, err := s3ListPrefix(cfg, from)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toClean, err := cleanRelative(to)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toPrefix, err := s3ListPrefix(cfg, toClean)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if fromPrefix == "" || toPrefix == "" {
+		return domain.FileEntry{}, errors.New("source and target paths are required")
+	}
+	moved := 0
+	for object := range client.ListObjects(context.Background(), cfg.Bucket, minio.ListObjectsOptions{Prefix: fromPrefix, Recursive: true}) {
+		if object.Err != nil {
+			return domain.FileEntry{}, object.Err
+		}
+		targetKey := toPrefix + strings.TrimPrefix(object.Key, fromPrefix)
+		if _, err := client.CopyObject(
+			context.Background(),
+			minio.CopyDestOptions{Bucket: cfg.Bucket, Object: targetKey},
+			minio.CopySrcOptions{Bucket: cfg.Bucket, Object: object.Key},
+		); err != nil {
+			return domain.FileEntry{}, err
+		}
+		if err := client.RemoveObject(context.Background(), cfg.Bucket, object.Key, minio.RemoveObjectOptions{}); err != nil {
+			return domain.FileEntry{}, err
+		}
+		moved++
+	}
+	if moved == 0 {
+		return domain.FileEntry{}, errors.New("source does not exist")
+	}
+	now := time.Now().Format(time.RFC3339)
+	return domain.FileEntry{Name: pathBase(toClean), Path: toClean, Type: "folder", Size: 0, ModifiedAt: now}, nil
+}
+
+func (s *Store) deleteS3Object(source domain.StorageSource, rel string) error {
+	client, cfg, err := s.s3Client(source)
+	if err != nil {
+		return err
+	}
+	key, err := s3ObjectKey(cfg, rel)
+	if err != nil {
+		return err
+	}
+	if key == "" {
+		return errors.New("refuse to delete storage root")
+	}
+	prefix := key
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	removed := 0
+	for object := range client.ListObjects(context.Background(), cfg.Bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if object.Err != nil {
+			return object.Err
+		}
+		if err := client.RemoveObject(context.Background(), cfg.Bucket, object.Key, minio.RemoveObjectOptions{}); err != nil {
+			return err
+		}
+		removed++
+	}
+	if removed > 0 {
+		return client.RemoveObject(context.Background(), cfg.Bucket, key, minio.RemoveObjectOptions{})
+	}
+	return client.RemoveObject(context.Background(), cfg.Bucket, key, minio.RemoveObjectOptions{})
+}
+
+func (s *Store) webDAVURL(source domain.StorageSource, rel string) (string, webDAVSourceConfig, error) {
+	cfg, err := webDAVConfigFromSource(source)
+	if err != nil {
+		return "", webDAVSourceConfig{}, err
+	}
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return "", webDAVSourceConfig{}, err
+	}
+	parsed, err := url.Parse(cfg.URL)
+	if err != nil {
+		return "", webDAVSourceConfig{}, err
+	}
+	parts := []string{strings.Trim(parsed.Path, "/")}
+	if cfg.Root != "" {
+		parts = append(parts, cfg.Root)
+	}
+	if clean != "" {
+		parts = append(parts, clean)
+	}
+	parsed.Path = escapePath(strings.Join(parts, "/"))
+	return parsed.String(), cfg, nil
+}
+
+func (s *Store) webDAVRequest(source domain.StorageSource, method, rel string, body io.Reader, headers map[string]string) (*http.Response, error) {
+	target, cfg, err := s.webDAVURL(source, rel)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Username != "" || cfg.Password != "" {
+		req.SetBasicAuth(cfg.Username, cfg.Password)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	return http.DefaultClient.Do(req)
+}
+
+func escapePath(value string) string {
+	value = strings.Trim(value, "/")
+	if value == "" {
+		return ""
+	}
+	parts := strings.Split(value, "/")
+	for index, part := range parts {
+		parts[index] = url.PathEscape(part)
+	}
+	return "/" + strings.Join(parts, "/")
+}
+
+func webDAVSuccess(status int) bool {
+	return status >= 200 && status < 300
+}
+
+func webDAVEntryFromResponse(cfg webDAVSourceConfig, response davResponse) (domain.FileEntry, bool) {
+	rel := webDAVRelFromHref(cfg, response.Href)
+	if rel == "" {
+		return domain.FileEntry{}, false
+	}
+	prop := davProp{}
+	status := response.Status
+	for _, propStat := range response.PropStat {
+		if strings.Contains(propStat.Status, " 200 ") || propStat.Status == "" {
+			prop = propStat.Prop
+			status = propStat.Status
+			break
+		}
+	}
+	if status != "" && !strings.Contains(status, " 200 ") {
+		return domain.FileEntry{}, false
+	}
+	entryType := "file"
+	size, _ := strconv.ParseInt(strings.TrimSpace(prop.Length), 10, 64)
+	path := strings.TrimSuffix(rel, "/")
+	if prop.ResourceType.Collection != nil || strings.HasSuffix(rel, "/") {
+		entryType = "folder"
+		size = 0
+	}
+	modifiedAt := time.Now().Format(time.RFC3339)
+	if modified, err := http.ParseTime(strings.TrimSpace(prop.Modified)); err == nil {
+		modifiedAt = modified.Format(time.RFC3339)
+	}
+	return domain.FileEntry{Name: pathBase(path), Path: path, Type: entryType, Size: size, ModifiedAt: modifiedAt}, true
+}
+
+func webDAVRelFromHref(cfg webDAVSourceConfig, href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		return ""
+	}
+	var pathText string
+	if parsed, err := url.Parse(href); err == nil {
+		pathText = parsed.Path
+	} else {
+		pathText = href
+	}
+	unescaped, err := url.PathUnescape(pathText)
+	if err == nil {
+		pathText = unescaped
+	}
+	baseParsed, _ := url.Parse(cfg.URL)
+	prefix := strings.Trim(strings.Trim(baseParsed.Path, "/")+"/"+cfg.Root, "/")
+	pathText = strings.Trim(pathText, "/")
+	if prefix != "" {
+		pathText = strings.TrimPrefix(pathText, prefix)
+	}
+	return strings.Trim(pathText, "/")
+}
+
+func (s *Store) listWebDAVFiles(source domain.StorageSource, rel string, publicOnly bool) ([]domain.FileEntry, error) {
+	body := `<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>`
+	res, err := s.webDAVRequest(source, "PROPFIND", rel, strings.NewReader(body), map[string]string{
+		"Depth":        "1",
+		"Content-Type": "application/xml; charset=utf-8",
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotFound {
+		return []domain.FileEntry{}, nil
+	}
+	if !webDAVSuccess(res.StatusCode) && res.StatusCode != 207 {
+		return nil, errors.New(res.Status)
+	}
+	var multistatus davMultiStatus
+	if err := xml.NewDecoder(res.Body).Decode(&multistatus); err != nil {
+		return nil, err
+	}
+	cfg, err := webDAVConfigFromSource(source)
+	if err != nil {
+		return nil, err
+	}
+	current, _ := cleanRelative(rel)
+	current = strings.Trim(current, "/")
+	files := make([]domain.FileEntry, 0)
+	for _, response := range multistatus.Responses {
+		entry, ok := webDAVEntryFromResponse(cfg, response)
+		if !ok || entry.Path == current {
+			continue
+		}
+		if !publicOnly || (!s.IsSourceHiddenPath(source, entry.Path) && !s.IsSourceBlockedPath(source, entry.Path)) {
+			files = append(files, entry)
+		}
+	}
+	return files, nil
+}
+
+func (s *Store) searchWebDAVFiles(source domain.StorageSource, query string, limit int) ([]domain.FileEntry, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []domain.FileEntry{}, nil
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	body := `<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>`
+	res, err := s.webDAVRequest(source, "PROPFIND", "", strings.NewReader(body), map[string]string{
+		"Depth":        "infinity",
+		"Content-Type": "application/xml; charset=utf-8",
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if !webDAVSuccess(res.StatusCode) && res.StatusCode != 207 {
+		return nil, errors.New(res.Status)
+	}
+	var multistatus davMultiStatus
+	if err := xml.NewDecoder(res.Body).Decode(&multistatus); err != nil {
+		return nil, err
+	}
+	cfg, err := webDAVConfigFromSource(source)
+	if err != nil {
+		return nil, err
+	}
+	needle := strings.ToLower(query)
+	results := make([]domain.FileEntry, 0)
+	for _, response := range multistatus.Responses {
+		entry, ok := webDAVEntryFromResponse(cfg, response)
+		if !ok || entry.Path == "" || !strings.Contains(strings.ToLower(entry.Path), needle) {
+			continue
+		}
+		results = append(results, entry)
+		if len(results) >= limit {
+			break
+		}
+	}
+	return results, nil
+}
+
+func (s *Store) webDAVDownload(source domain.StorageSource, rel string) (sourceDownload, error) {
+	res, err := s.webDAVRequest(source, http.MethodGet, rel, nil, nil)
+	if err != nil {
+		return sourceDownload{}, err
+	}
+	defer res.Body.Close()
+	if !webDAVSuccess(res.StatusCode) {
+		return sourceDownload{}, errors.New(res.Status)
+	}
+	tmp, err := os.CreateTemp("", "xfile-webdav-*")
+	if err != nil {
+		return sourceDownload{}, err
+	}
+	if _, err := io.Copy(tmp, res.Body); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return sourceDownload{}, err
+	}
+	info, err := tmp.Stat()
+	if err != nil {
+		tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return sourceDownload{}, err
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return sourceDownload{}, err
+	}
+	return sourceDownload{Entry: fileInfoEntry(rel, info), Reader: tempReadSeekCloser{File: tmp, path: tmp.Name()}}, nil
+}
+
+func (s *Store) webDAVUploadAllowed(source domain.StorageSource, dirRel, filename string) error {
+	filename = filepath.Base(filename)
+	if strings.TrimSpace(filename) == "" || filename == "." {
+		return errors.New("filename is required")
+	}
+	targetRel := cleanJoin(dirRel, filename)
+	if _, err := cleanRelative(targetRel); err != nil {
+		return err
+	}
+	if denyList := s.SettingValue("uploadPathDenyList", ""); pathMatchesRules(targetRel, denyList) {
+		return errors.New("upload path is denied")
+	}
+	if allowList := strings.TrimSpace(s.SettingValue("uploadPathAllowList", "")); allowList != "" && !pathMatchesRules(targetRel, allowList) {
+		return errors.New("upload path is not allowed")
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" {
+		ext = "(none)"
+	}
+	if extensionInList(ext, s.SettingValue("uploadDenyExtensions", "")) {
+		return errors.New("file extension is denied")
+	}
+	if allowList := strings.TrimSpace(s.SettingValue("uploadAllowExtensions", "")); allowList != "" && !extensionInList(ext, allowList) {
+		return errors.New("file extension is not allowed")
+	}
+	if s.SettingValue("uploadOverwrite", "enabled") == "enabled" {
+		return nil
+	}
+	res, err := s.webDAVRequest(source, http.MethodHead, targetRel, nil, nil)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if webDAVSuccess(res.StatusCode) {
+		return errors.New("target already exists")
+	}
+	if res.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	return errors.New(res.Status)
+}
+
+func (s *Store) putWebDAVFile(source domain.StorageSource, rel string, reader io.Reader) error {
+	res, err := s.webDAVRequest(source, http.MethodPut, rel, reader, nil)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if !webDAVSuccess(res.StatusCode) {
+		return errors.New(res.Status)
+	}
+	return nil
+}
+
+func (s *Store) createWebDAVFolder(source domain.StorageSource, rel string) (domain.FileEntry, error) {
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if clean == "" {
+		return domain.FileEntry{}, errors.New("folder path is required")
+	}
+	res, err := s.webDAVRequest(source, "MKCOL", clean, nil, nil)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	defer res.Body.Close()
+	if !webDAVSuccess(res.StatusCode) && res.StatusCode != http.StatusMethodNotAllowed {
+		return domain.FileEntry{}, errors.New(res.Status)
+	}
+	return domain.FileEntry{Name: pathBase(clean), Path: clean, Type: "folder", Size: 0, ModifiedAt: time.Now().Format(time.RFC3339)}, nil
+}
+
+func (s *Store) createWebDAVEmptyFile(source domain.StorageSource, rel string) (domain.FileEntry, error) {
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return domain.FileEntry{}, errors.New("file path is required")
+	}
+	if strings.HasSuffix(filepath.ToSlash(rel), "/") {
+		return domain.FileEntry{}, errors.New("file name is required")
+	}
+	dirRel := filepath.ToSlash(filepath.Dir(rel))
+	if dirRel == "." {
+		dirRel = ""
+	}
+	name := filepath.Base(rel)
+	if err := s.webDAVUploadAllowed(source, dirRel, name); err != nil {
+		return domain.FileEntry{}, err
+	}
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if err := s.putWebDAVFile(source, clean, strings.NewReader("")); err != nil {
+		return domain.FileEntry{}, err
+	}
+	return domain.FileEntry{Name: pathBase(clean), Path: clean, Type: "file", Size: 0, ModifiedAt: time.Now().Format(time.RFC3339)}, nil
+}
+
+func (s *Store) moveWebDAVPath(source domain.StorageSource, from, to string) (domain.FileEntry, error) {
+	fromClean, err := cleanRelative(from)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toClean, err := cleanRelative(to)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	destination, _, err := s.webDAVURL(source, toClean)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	res, err := s.webDAVRequest(source, "MOVE", fromClean, nil, map[string]string{
+		"Destination": destination,
+		"Overwrite":   "F",
+	})
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	defer res.Body.Close()
+	if !webDAVSuccess(res.StatusCode) {
+		return domain.FileEntry{}, errors.New(res.Status)
+	}
+	return domain.FileEntry{Name: pathBase(toClean), Path: toClean, Type: "file", Size: 0, ModifiedAt: time.Now().Format(time.RFC3339)}, nil
+}
+
+func (s *Store) deleteWebDAVPath(source domain.StorageSource, rel string) error {
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return err
+	}
+	if clean == "" {
+		return errors.New("refuse to delete storage root")
+	}
+	res, err := s.webDAVRequest(source, http.MethodDelete, clean, nil, nil)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if !webDAVSuccess(res.StatusCode) && res.StatusCode != http.StatusNotFound {
+		return errors.New(res.Status)
+	}
+	return nil
+}
+
 func (s *Store) safePath(rel string) (string, error) {
-	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
-	clean := filepath.Clean(filepath.FromSlash(rel))
-	if clean == "." {
-		clean = ""
-	}
-	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
-		return "", errors.New("invalid path")
-	}
-	root, err := filepath.Abs(s.cfg.FilesDir)
-	if err != nil {
-		return "", err
-	}
-	target, err := filepath.Abs(filepath.Join(root, clean))
-	if err != nil {
-		return "", err
-	}
-	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
-		return "", errors.New("path escapes storage root")
-	}
-	return target, nil
+	return safePathInRoot(s.cfg.FilesDir, rel)
 }
 
 func (s *Store) sourceSafePath(source domain.StorageSource, rel string) (string, error) {
@@ -1396,6 +2631,10 @@ func (s *Store) sourceSafePath(source domain.StorageSource, rel string) (string,
 	if rootText == "" {
 		rootText = s.cfg.FilesDir
 	}
+	return safePathInRoot(rootText, rel)
+}
+
+func safePathInRoot(rootText, rel string) (string, error) {
 	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
 	clean := filepath.Clean(filepath.FromSlash(rel))
 	if clean == "." {

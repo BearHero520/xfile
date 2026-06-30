@@ -6,16 +6,16 @@ This file tracks the remaining ZFile-inspired features to add while keeping XFil
 
 - [x] Manage multiple storage source instances.
 - [x] Enable, disable, publish, privatize, and sort storage sources.
-- [ ] Support local storage source browsing by each source root.
-- [ ] Implement S3 / MinIO adapter.
-- [ ] Implement WebDAV adapter.
-- [ ] Implement Aliyun OSS adapter.
-- [ ] Implement Tencent COS adapter.
+- [x] Support local storage source browsing by each source root.
+- [x] Implement S3 / MinIO adapter.
+- [x] Implement WebDAV adapter.
+- [x] Implement Aliyun OSS adapter.
+- [x] Implement Tencent COS adapter.
 
 ## Phase 2 - File Rules And Permissions
 
-- [ ] Add per-storage hidden path rules.
-- [ ] Add per-storage blocked path rules.
+- [x] Add per-storage hidden path rules.
+- [x] Add per-storage blocked path rules.
 - [ ] Add directory password rules.
 - [ ] Add operation permissions for preview, download, upload, rename, move, copy, delete, share, and direct links.
 - [ ] Apply rules through a single file-list processing pipeline.

@@ -75,9 +75,10 @@ const contextMenu = ref({
 
 const isLoggedIn = computed(() => site.value.loggedIn)
 const publicSources = computed(() => site.value.sources.filter(source => source.enabled && (isLoggedIn.value || source.public)))
-const activeSource = computed<StorageSource | undefined>(() => publicSources.value.find(source => source.key === activeSourceKey.value) || publicSources.value[0])
+const selectableSources = computed(() => isLoggedIn.value ? site.value.sources : publicSources.value)
+const activeSource = computed<StorageSource | undefined>(() => selectableSources.value.find(source => source.key === activeSourceKey.value) || selectableSources.value[0])
 const selectedCount = computed(() => selectedFiles.value.length)
-const currentStorageSource = computed(() => activeSource.value ? `${activeSource.value.name} / ${activeSource.value.typeLabel}` : '暂无公开存储源')
+const currentStorageSource = computed(() => activeSource.value ? `${activeSource.value.name} / ${activeSource.value.typeLabel}` : '暂无存储源')
 
 const searchModeOptions = [
   { label: '当前目录', value: 'current' },
@@ -95,7 +96,9 @@ const displayedFiles = computed(() => {
 
 const fileEmptyText = computed(() => {
   if (!activeSource.value)
-    return '暂无可访问的存储源'
+    return isLoggedIn.value ? '暂无存储源，请先在存储源管理中新建' : '暂无公开存储源'
+  if (!activeSource.value.enabled)
+    return '当前存储源已停用'
   if (searchMode.value === 'global' && keyword.value.trim())
     return '未找到匹配文件'
   return '当前目录暂无文件'
@@ -120,8 +123,8 @@ function setSource(key: string) {
 
 async function loadSite() {
   site.value = await api<PublicSite>('/api/public/site', { skipAuthRedirect: true } as RequestInit)
-  if (!activeSourceKey.value && site.value.sources.length)
-    activeSourceKey.value = site.value.sources[0].key
+  if (!selectableSources.value.some(source => source.key === activeSourceKey.value))
+    activeSourceKey.value = selectableSources.value[0]?.key || ''
 }
 
 async function loadFiles() {
@@ -129,8 +132,14 @@ async function loadFiles() {
     files.value = []
     return
   }
+  if (!activeSource.value.enabled) {
+    files.value = []
+    selectedFiles.value = []
+    return
+  }
   if (isLoggedIn.value) {
-    files.value = await api<FileEntry[]>(`/api/files?path=${encodeURIComponent(activePath.value)}`)
+    const params = new URLSearchParams({ storageKey: activeSource.value.key, path: activePath.value })
+    files.value = await api<FileEntry[]>(`/api/files?${params.toString()}`)
   }
   else {
     files.value = await api<FileEntry[]>(`/api/public/storage/${encodeURIComponent(activeSource.value.key)}/files?path=${encodeURIComponent(activePath.value)}`, { skipAuthRedirect: true } as RequestInit)
@@ -179,7 +188,8 @@ async function runSearch() {
   }
   searching.value = true
   try {
-    globalResults.value = await api<FileEntry[]>(`/api/files/search?q=${encodeURIComponent(term)}&limit=100`)
+    const params = new URLSearchParams({ storageKey: activeSource.value?.key || 'local', q: term, limit: '100' })
+    globalResults.value = await api<FileEntry[]>(`/api/files/search?${params.toString()}`)
   }
   catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '搜索失败')
@@ -203,7 +213,7 @@ function openFolder(file: FileEntry) {
 
 function currentFileUrl(path: string) {
   if (isLoggedIn.value)
-    return fileUrl(path)
+    return fileUrl(path, activeSource.value?.key || 'local')
   return publicFileUrl(activeSource.value?.key || 'local', path)
 }
 
@@ -307,6 +317,7 @@ async function uploadFile(event: Event) {
     return
   const form = new FormData()
   form.set('path', activePath.value)
+  form.set('storageKey', activeSource.value?.key || 'local')
   form.set('file', file)
   await api('/api/files/upload', { method: 'POST', body: form })
   input.value = ''
@@ -320,7 +331,7 @@ async function createFolder() {
     inputErrorMessage: '目录名称不能包含斜杠',
   })
   const path = [activePath.value, value].filter(Boolean).join('/')
-  await api('/api/files/folders', { method: 'POST', body: JSON.stringify({ path }) })
+  await api('/api/files/folders', { method: 'POST', body: JSON.stringify({ storageKey: activeSource.value?.key || 'local', path }) })
   ElMessage.success('目录已创建')
   await loadFiles()
 }
@@ -331,7 +342,7 @@ async function createEmptyFile() {
     inputErrorMessage: '文件名称不能包含斜杠',
   })
   const path = [activePath.value, value].filter(Boolean).join('/')
-  await api('/api/files/empty', { method: 'POST', body: JSON.stringify({ path }) })
+  await api('/api/files/empty', { method: 'POST', body: JSON.stringify({ storageKey: activeSource.value?.key || 'local', path }) })
   ElMessage.success('文件已创建')
   await loadFiles()
 }
@@ -344,7 +355,7 @@ async function renameFile(file: FileEntry) {
   })
   const base = file.path.split('/').slice(0, -1).join('/')
   const to = [base, value].filter(Boolean).join('/')
-  await api('/api/files', { method: 'PATCH', body: JSON.stringify({ from: file.path, to }) })
+  await api('/api/files', { method: 'PATCH', body: JSON.stringify({ storageKey: activeSource.value?.key || 'local', from: file.path, to }) })
   ElMessage.success('已重命名')
   await loadFiles()
 }
@@ -353,12 +364,16 @@ async function moveFile(file: FileEntry) {
   const { value } = await ElMessageBox.prompt('输入目标路径，例如 docs/readme.md', '移动文件', {
     inputValue: file.path,
   })
-  await api('/api/files', { method: 'PATCH', body: JSON.stringify({ from: file.path, to: value }) })
+  await api('/api/files', { method: 'PATCH', body: JSON.stringify({ storageKey: activeSource.value?.key || 'local', from: file.path, to: value }) })
   ElMessage.success('已移动')
   await loadFiles()
 }
 
 async function createShare(file: FileEntry) {
+  if ((activeSource.value?.key || 'local') !== 'local') {
+    ElMessage.info('跨存储源分享将在下一项接入')
+    return
+  }
   const { value: password } = await ElMessageBox.prompt('可选：设置分享密码，留空表示公开', '创建分享', {
     inputPlaceholder: '分享密码',
   })
@@ -371,6 +386,10 @@ async function createShare(file: FileEntry) {
 }
 
 async function createDirectLink(file: FileEntry) {
+  if ((activeSource.value?.key || 'local') !== 'local') {
+    ElMessage.info('跨存储源直链将在下一项接入')
+    return
+  }
   await api('/api/direct-links', {
     method: 'POST',
     body: JSON.stringify({ path: file.path }),
@@ -380,7 +399,8 @@ async function createDirectLink(file: FileEntry) {
 
 async function removeFile(file: FileEntry) {
   await ElMessageBox.confirm(`确认删除 ${file.name}？`, '删除文件')
-  await api(`/api/files?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' })
+  const params = new URLSearchParams({ storageKey: activeSource.value?.key || 'local', path: file.path })
+  await api(`/api/files?${params.toString()}`, { method: 'DELETE' })
   ElMessage.success('已删除')
   await loadFiles()
 }
@@ -389,8 +409,10 @@ async function removeSelected() {
   if (!selectedFiles.value.length)
     return
   await ElMessageBox.confirm(`确认删除选中的 ${selectedFiles.value.length} 项？`, '批量删除')
-  for (const file of selectedFiles.value)
-    await api(`/api/files?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' })
+  for (const file of selectedFiles.value) {
+    const params = new URLSearchParams({ storageKey: activeSource.value?.key || 'local', path: file.path })
+    await api(`/api/files?${params.toString()}`, { method: 'DELETE' })
+  }
   selectedFiles.value = []
   ElMessage.success('已删除')
   await loadFiles()
@@ -475,18 +497,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="workspace" v-loading="loading">
-    <section v-if="!isLoggedIn && publicSources.length > 1" class="storage-source-strip">
-      <button
-        v-for="source in publicSources"
-        :key="source.key"
-        :class="{ active: activeSource?.key === source.key }"
-        @click="setSource(source.key)"
-      >
-        <strong>{{ source.name }}</strong>
-        <span>{{ source.typeLabel }}</span>
-      </button>
-    </section>
-
     <section class="bucket-shell">
       <div class="bucket-header">
         <div>
@@ -508,6 +518,20 @@ onBeforeUnmount(() => {
         </div>
         <div class="quick-actions">
           <input ref="uploader" class="hidden-input" type="file" @change="uploadFile">
+          <el-select
+            v-if="selectableSources.length > 1"
+            v-model="activeSourceKey"
+            class="source-select"
+            size="default"
+            @change="setSource"
+          >
+            <el-option
+              v-for="source in selectableSources"
+              :key="source.key"
+              :label="`${source.name} / ${source.typeLabel}${isLoggedIn && !source.enabled ? ' / 停用' : ''}`"
+              :value="source.key"
+            />
+          </el-select>
           <RouterLink v-if="!isLoggedIn" to="/login">
             <el-button type="primary">
               登录管理

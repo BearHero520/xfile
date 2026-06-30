@@ -9,26 +9,30 @@ type FileEntry struct {
 }
 
 type StorageSource struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Key       string `json:"key"`
-	Type      string `json:"type"`
-	TypeLabel string `json:"typeLabel"`
-	RootPath  string `json:"rootPath,omitempty"`
-	Public    bool   `json:"public"`
-	Enabled   bool   `json:"enabled"`
-	OrderNum  int    `json:"orderNum"`
-	CreatedAt string `json:"createdAt"`
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	Key          string `json:"key"`
+	Type         string `json:"type"`
+	TypeLabel    string `json:"typeLabel"`
+	RootPath     string `json:"rootPath,omitempty"`
+	HiddenPaths  string `json:"hiddenPaths,omitempty"`
+	BlockedPaths string `json:"blockedPaths,omitempty"`
+	Public       bool   `json:"public"`
+	Enabled      bool   `json:"enabled"`
+	OrderNum     int    `json:"orderNum"`
+	CreatedAt    string `json:"createdAt"`
 }
 
 type StorageSourceInput struct {
-	Name     string `json:"name"`
-	Key      string `json:"key"`
-	Type     string `json:"type"`
-	RootPath string `json:"rootPath"`
-	Public   bool   `json:"public"`
-	Enabled  bool   `json:"enabled"`
-	OrderNum int    `json:"orderNum"`
+	Name         string `json:"name"`
+	Key          string `json:"key"`
+	Type         string `json:"type"`
+	RootPath     string `json:"rootPath"`
+	HiddenPaths  string `json:"hiddenPaths"`
+	BlockedPaths string `json:"blockedPaths"`
+	Public       bool   `json:"public"`
+	Enabled      bool   `json:"enabled"`
+	OrderNum     int    `json:"orderNum"`
 }
 
 type PublicSite struct {

@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,8 +80,8 @@ func TestStorageSourceManagement(t *testing.T) {
 	if _, err := s.CreateStorageSource(domain.StorageSourceInput{Name: "dup", Key: "alt-private", Type: "local", RootPath: root}); err == nil {
 		t.Fatal("expected duplicate key to fail")
 	}
-	if _, err := s.CreateStorageSource(domain.StorageSourceInput{Name: "remote", Key: "remote", Type: "s3", Enabled: true}); err == nil {
-		t.Fatal("expected enabled remote adapter to fail while unimplemented")
+	if _, err := s.CreateStorageSource(domain.StorageSourceInput{Name: "remote", Key: "remote", Type: "webdav", Enabled: true}); err == nil {
+		t.Fatal("expected enabled WebDAV without config to fail")
 	}
 	if err := s.DeleteStorageSource(source.ID); err != nil {
 		t.Fatalf("delete storage source: %v", err)
@@ -89,13 +90,309 @@ func TestStorageSourceManagement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list remaining storage sources: %v", err)
 	}
-	for _, item := range remaining[1:] {
+	for _, item := range remaining {
 		if err := s.DeleteStorageSource(item.ID); err != nil {
 			t.Fatalf("delete extra storage source: %v", err)
 		}
 	}
-	if err := s.DeleteStorageSource(remaining[0].ID); err == nil {
-		t.Fatal("expected deleting final storage source to fail")
+	empty, err := s.StorageSources(false)
+	if err != nil {
+		t.Fatalf("list empty storage sources: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected all storage sources to be deleted: %#v", empty)
+	}
+}
+
+func TestS3StorageSourceConfigAndPublicSanitization(t *testing.T) {
+	s := newTestStore(t)
+	cases := []struct {
+		sourceType string
+		key        string
+	}{
+		{"s3", "object-store"},
+		{"aliyun_oss", "aliyun-store"},
+		{"tencent_cos", "tencent-store"},
+	}
+	for _, tc := range cases {
+		source, err := s.CreateStorageSource(domain.StorageSourceInput{
+			Name:     tc.key,
+			Key:      tc.key,
+			Type:     tc.sourceType,
+			RootPath: `{"endpoint":"https://s3.example.com","bucket":"files","region":"us-east-1","accessKey":"ak","secretKey":"sk","prefix":"root","secure":false}`,
+			Public:   true,
+			Enabled:  true,
+			OrderNum: 20,
+		})
+		if err != nil {
+			t.Fatalf("create %s source: %v", tc.sourceType, err)
+		}
+		if source.Type != tc.sourceType || source.RootPath == "" {
+			t.Fatalf("unexpected %s source: %#v", tc.sourceType, source)
+		}
+		if !strings.Contains(source.RootPath, `"endpoint":"s3.example.com"`) || !strings.Contains(source.RootPath, `"secure":true`) {
+			t.Fatalf("%s config was not normalized from endpoint scheme: %s", tc.sourceType, source.RootPath)
+		}
+	}
+
+	publicSources, err := s.StorageSources(true)
+	if err != nil {
+		t.Fatalf("public storage sources: %v", err)
+	}
+	for _, item := range publicSources {
+		if (item.Type == "s3" || item.Type == "aliyun_oss" || item.Type == "tencent_cos") && item.RootPath != "" {
+			t.Fatalf("public source leaked root config: %#v", item)
+		}
+	}
+}
+
+func TestWebDAVStorageSourceConfigAndPublicSanitization(t *testing.T) {
+	s := newTestStore(t)
+	source, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:     "DAV",
+		Key:      "dav",
+		Type:     "webdav",
+		RootPath: `{"url":"https://dav.example.com/root/","username":"user","password":"pass","root":"docs/"}`,
+		Public:   true,
+		Enabled:  true,
+		OrderNum: 21,
+	})
+	if err != nil {
+		t.Fatalf("create WebDAV source: %v", err)
+	}
+	if !strings.Contains(source.RootPath, `"url":"https://dav.example.com/root"`) || !strings.Contains(source.RootPath, `"root":"docs"`) {
+		t.Fatalf("WebDAV config was not normalized: %s", source.RootPath)
+	}
+	publicSources, err := s.StorageSources(true)
+	if err != nil {
+		t.Fatalf("public storage sources: %v", err)
+	}
+	for _, item := range publicSources {
+		if item.Key == source.Key && item.RootPath != "" {
+			t.Fatalf("public WebDAV source leaked root config: %#v", item)
+		}
+	}
+}
+
+func TestLocalSourceFileOperationsUseSourceRoot(t *testing.T) {
+	s := newTestStore(t)
+	firstRoot := filepath.Join(t.TempDir(), "first")
+	secondRoot := filepath.Join(t.TempDir(), "second")
+
+	first, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:     "First local",
+		Key:      "first-local",
+		Type:     "local",
+		RootPath: firstRoot,
+		Public:   true,
+		Enabled:  true,
+		OrderNum: 11,
+	})
+	if err != nil {
+		t.Fatalf("create first source: %v", err)
+	}
+	second, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:     "Second local",
+		Key:      "second-local",
+		Type:     "local",
+		RootPath: secondRoot,
+		Public:   true,
+		Enabled:  true,
+		OrderNum: 12,
+	})
+	if err != nil {
+		t.Fatalf("create second source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(firstRoot, "first.txt"), []byte("first"), 0o644); err != nil {
+		t.Fatalf("write first root file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secondRoot, "second.txt"), []byte("second"), 0o644); err != nil {
+		t.Fatalf("write second root file: %v", err)
+	}
+
+	firstFiles, err := s.ListSourceFilesForAdmin(first.Key, "")
+	if err != nil {
+		t.Fatalf("list first source: %v", err)
+	}
+	if len(firstFiles) != 1 || firstFiles[0].Path != "first.txt" {
+		t.Fatalf("unexpected first source files: %#v", firstFiles)
+	}
+	secondFiles, err := s.ListSourceFilesForAdmin(second.Key, "")
+	if err != nil {
+		t.Fatalf("list second source: %v", err)
+	}
+	if len(secondFiles) != 1 || secondFiles[0].Path != "second.txt" {
+		t.Fatalf("unexpected second source files: %#v", secondFiles)
+	}
+
+	if _, err := s.CreateSourceFolder(second.Key, "docs"); err != nil {
+		t.Fatalf("create source folder: %v", err)
+	}
+	if _, err := s.CreateSourceEmptyFile(second.Key, "docs/note.txt"); err != nil {
+		t.Fatalf("create source empty file: %v", err)
+	}
+	if _, err := s.MoveSourceFile(second.Key, "docs/note.txt", "archive/note.txt"); err != nil {
+		t.Fatalf("move source file: %v", err)
+	}
+	if err := s.DeleteSourceFile(second.Key, "archive/note.txt"); err != nil {
+		t.Fatalf("delete source file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(secondRoot, "archive", "note.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected moved file to be deleted, stat err: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(firstRoot, "docs")); !os.IsNotExist(err) {
+		t.Fatalf("first root should not receive second source operations, stat err: %v", err)
+	}
+}
+
+func TestPublicLocalSourceCreatesMissingRoot(t *testing.T) {
+	s := newTestStore(t)
+	root := filepath.Join(t.TempDir(), "missing-root")
+	source, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:     "Missing root",
+		Key:      "missing-root",
+		Type:     "local",
+		RootPath: root,
+		Public:   true,
+		Enabled:  true,
+		OrderNum: 30,
+	})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatalf("remove source root: %v", err)
+	}
+
+	files, err := s.ListSourceFiles(source.Key, "", true)
+	if err != nil {
+		t.Fatalf("list public files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("expected empty files: %#v", files)
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		t.Fatalf("expected source root to be recreated, info=%#v err=%v", info, err)
+	}
+}
+
+func TestPerStorageHiddenPathsFilterPublicListing(t *testing.T) {
+	s := newTestStore(t)
+	firstRoot := filepath.Join(t.TempDir(), "first")
+	secondRoot := filepath.Join(t.TempDir(), "second")
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.MkdirAll(filepath.Join(root, "private"), 0o755); err != nil {
+			t.Fatalf("mkdir private: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "private", "hidden.txt"), []byte("secret"), 0o644); err != nil {
+			t.Fatalf("write hidden: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "readme.txt"), []byte("hello"), 0o644); err != nil {
+			t.Fatalf("write readme: %v", err)
+		}
+	}
+	first, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:        "First",
+		Key:         "first-hidden",
+		Type:        "local",
+		RootPath:    firstRoot,
+		HiddenPaths: "private",
+		Public:      true,
+		Enabled:     true,
+		OrderNum:    31,
+	})
+	if err != nil {
+		t.Fatalf("create first source: %v", err)
+	}
+	second, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:     "Second",
+		Key:      "second-visible",
+		Type:     "local",
+		RootPath: secondRoot,
+		Public:   true,
+		Enabled:  true,
+		OrderNum: 32,
+	})
+	if err != nil {
+		t.Fatalf("create second source: %v", err)
+	}
+
+	firstFiles, err := s.ListSourceFiles(first.Key, "", true)
+	if err != nil {
+		t.Fatalf("list first public files: %v", err)
+	}
+	if len(firstFiles) != 1 || firstFiles[0].Path != "readme.txt" {
+		t.Fatalf("hidden path was not filtered for first source: %#v", firstFiles)
+	}
+	secondFiles, err := s.ListSourceFiles(second.Key, "", true)
+	if err != nil {
+		t.Fatalf("list second public files: %v", err)
+	}
+	if len(secondFiles) != 2 {
+		t.Fatalf("second source should not inherit first hidden rules: %#v", secondFiles)
+	}
+}
+
+func TestPerStorageBlockedPathsRejectPublicAccess(t *testing.T) {
+	s := newTestStore(t)
+	firstRoot := filepath.Join(t.TempDir(), "first-blocked")
+	secondRoot := filepath.Join(t.TempDir(), "second-blocked")
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.MkdirAll(filepath.Join(root, "secret"), 0o755); err != nil {
+			t.Fatalf("mkdir secret: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "secret", "blocked.txt"), []byte("secret"), 0o644); err != nil {
+			t.Fatalf("write blocked: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "readme.txt"), []byte("hello"), 0o644); err != nil {
+			t.Fatalf("write readme: %v", err)
+		}
+	}
+	first, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:         "First blocked",
+		Key:          "first-blocked",
+		Type:         "local",
+		RootPath:     firstRoot,
+		BlockedPaths: "secret",
+		Public:       true,
+		Enabled:      true,
+		OrderNum:     33,
+	})
+	if err != nil {
+		t.Fatalf("create first source: %v", err)
+	}
+	second, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:     "Second blocked",
+		Key:      "second-blocked",
+		Type:     "local",
+		RootPath: secondRoot,
+		Public:   true,
+		Enabled:  true,
+		OrderNum: 34,
+	})
+	if err != nil {
+		t.Fatalf("create second source: %v", err)
+	}
+
+	firstFiles, err := s.ListSourceFiles(first.Key, "", true)
+	if err != nil {
+		t.Fatalf("list first public files: %v", err)
+	}
+	if len(firstFiles) != 1 || firstFiles[0].Path != "readme.txt" {
+		t.Fatalf("blocked path was not filtered for first source: %#v", firstFiles)
+	}
+	if _, err := s.ListSourceFiles(first.Key, "secret", true); err == nil {
+		t.Fatal("expected public listing blocked path to fail")
+	}
+	if _, err := s.SourceDownload(first.Key, "secret/blocked.txt", true); err == nil {
+		t.Fatal("expected public download blocked path to fail")
+	}
+	secondFiles, err := s.ListSourceFiles(second.Key, "", true)
+	if err != nil {
+		t.Fatalf("list second public files: %v", err)
+	}
+	if len(secondFiles) != 2 {
+		t.Fatalf("second source should not inherit first blocked rules: %#v", secondFiles)
 	}
 }
 

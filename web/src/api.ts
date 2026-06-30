@@ -13,6 +13,8 @@ export interface StorageSource {
   type: string
   typeLabel: string
   rootPath?: string
+  hiddenPaths?: string
+  blockedPaths?: string
   public: boolean
   enabled: boolean
   orderNum: number
@@ -119,8 +121,11 @@ export async function api<T>(url: string, options: ApiOptions = {}): Promise<T> 
   return res.json() as Promise<T>
 }
 
-export function fileUrl(path: string) {
-  return `/api/files/download?path=${encodeURIComponent(path)}`
+export function fileUrl(path: string, storageKey = 'local') {
+  const params = new URLSearchParams({ path })
+  if (storageKey)
+    params.set('storageKey', storageKey)
+  return `/api/files/download?${params.toString()}`
 }
 
 export function publicFileUrl(storageKey: string, path: string) {

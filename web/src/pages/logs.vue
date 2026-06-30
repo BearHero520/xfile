@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import type { AccessLog, AccessLogPage } from '~/api'
-import { Refresh, Search } from '@element-plus/icons-vue'
+import { Delete, Refresh, Search } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, reactive, ref } from 'vue'
 import { api, formatTime } from '~/api'
 
 const logs = ref<AccessLog[]>([])
 const total = ref(0)
 const loading = ref(false)
+const cleanupLoading = ref(false)
 const filters = reactive({
   action: '',
   path: '',
@@ -18,6 +20,7 @@ const filters = reactive({
 const actionOptions = [
   { label: '全部动作', value: '' },
   { label: '浏览', value: 'list' },
+  { label: '搜索', value: 'search' },
   { label: '下载', value: 'download' },
   { label: '上传', value: 'upload' },
   { label: '删除', value: 'delete' },
@@ -26,6 +29,8 @@ const actionOptions = [
   { label: '分享访问', value: 'share-view' },
   { label: '分享下载', value: 'share-download' },
   { label: '直链访问', value: 'direct' },
+  { label: 'IP 拦截', value: 'ip-blocked' },
+  { label: '日志清理', value: 'logs-cleanup' },
 ]
 
 function logQuery() {
@@ -80,6 +85,27 @@ function changePageSize(pageSize: number) {
   void loadLogs()
 }
 
+async function cleanupLogs(mode: 'old' | 'all') {
+  const all = mode === 'all'
+  await ElMessageBox.confirm(
+    all ? '确认清空全部访问日志？此操作不可恢复。' : '确认删除 30 天前的访问日志？',
+    all ? '清空日志' : '清理旧日志',
+    { type: 'warning' },
+  )
+  cleanupLoading.value = true
+  try {
+    const data = await api<{ deleted: number }>(all ? '/api/logs?all=true' : '/api/logs?olderThanDays=30', {
+      method: 'DELETE',
+    })
+    ElMessage.success(`已删除 ${data.deleted} 条日志`)
+    filters.page = 1
+    await loadLogs()
+  }
+  finally {
+    cleanupLoading.value = false
+  }
+}
+
 onMounted(loadLogs)
 </script>
 
@@ -92,8 +118,16 @@ onMounted(loadLogs)
             访问日志
           </div>
           <p class="lede">
-            查看文件下载、目录访问、上传、删除、分享和直链访问记录。
+            查看文件操作、分享、直链、搜索和访问控制拦截记录。
           </p>
+        </div>
+        <div class="panel-actions">
+          <el-button :icon="Delete" :loading="cleanupLoading" @click="cleanupLogs('old')">
+            清理 30 天前
+          </el-button>
+          <el-button type="danger" :icon="Delete" :loading="cleanupLoading" @click="cleanupLogs('all')">
+            清空全部
+          </el-button>
         </div>
       </div>
 
@@ -109,10 +143,10 @@ onMounted(loadLogs)
           </el-select>
         </el-form-item>
         <el-form-item label="路径">
-          <el-input v-model="filters.path" clearable placeholder="输入路径关键字" @keyup.enter="searchLogs" />
+          <el-input v-model="filters.path" clearable placeholder="输入路径关键词" @keyup.enter="searchLogs" />
         </el-form-item>
         <el-form-item label="IP">
-          <el-input v-model="filters.ip" clearable placeholder="输入 IP 关键字" @keyup.enter="searchLogs" />
+          <el-input v-model="filters.ip" clearable placeholder="输入 IP 关键词" @keyup.enter="searchLogs" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :icon="Search" @click="searchLogs">
@@ -125,7 +159,7 @@ onMounted(loadLogs)
       </el-form>
 
       <el-table :data="logs" empty-text="暂无访问日志">
-        <el-table-column prop="action" label="动作" width="120" />
+        <el-table-column prop="action" label="动作" width="130" />
         <el-table-column prop="path" label="路径" min-width="260" show-overflow-tooltip />
         <el-table-column prop="ip" label="IP" width="160" />
         <el-table-column prop="userAgent" label="客户端" min-width="220" show-overflow-tooltip />

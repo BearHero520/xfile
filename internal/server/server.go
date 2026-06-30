@@ -26,8 +26,8 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.health)
-	s.mux.HandleFunc("GET /api/public/shares/{token}", s.accessControlled(s.publicShare))
-	s.mux.HandleFunc("GET /api/public/shares/{token}/download", s.accessControlled(s.downloadShare))
+	s.mux.HandleFunc("GET /api/public/shares/{token}", s.publicLinkControlled(s.publicShare))
+	s.mux.HandleFunc("GET /api/public/shares/{token}/download", s.publicLinkControlled(s.downloadShare))
 	s.mux.HandleFunc("POST /api/auth/setup", s.accessControlled(s.setup))
 	s.mux.HandleFunc("POST /api/auth/login", s.accessControlled(s.login))
 	s.mux.HandleFunc("POST /api/auth/logout", s.accessControlled(s.logout))
@@ -48,9 +48,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/direct-links/{id}", s.private(s.updateDirectLink))
 	s.mux.HandleFunc("DELETE /api/direct-links/{id}", s.private(s.deleteDirectLink))
 	s.mux.HandleFunc("GET /api/logs", s.private(s.accessLogs))
+	s.mux.HandleFunc("DELETE /api/logs", s.private(s.deleteAccessLogs))
 	s.mux.HandleFunc("GET /api/settings", s.private(s.getSettings))
 	s.mux.HandleFunc("PUT /api/settings", s.private(s.saveSettings))
 	s.mux.HandleFunc("GET /s/{token}", s.sharePage)
-	s.mux.HandleFunc("GET /d/{token}", s.accessControlled(s.openDirectLink))
+	s.mux.HandleFunc("GET /d/{token}", s.publicLinkControlled(s.openDirectLink))
 	s.mux.Handle("/", spaHandler(s.cfg.StaticDir))
 }

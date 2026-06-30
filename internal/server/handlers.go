@@ -203,6 +203,9 @@ func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
+	if share, err := s.store.ResolveShare(r.PathValue("token"), r.URL.Query().Get("password")); err == nil {
+		_ = s.store.RecordShareView(share.ID)
+	}
 	_ = s.store.LogAccess("share-view", detail.CurrentPath, clientIP(r), r.UserAgent())
 	writeJSON(w, http.StatusOK, detail)
 }
@@ -213,6 +216,7 @@ func (s *Server) downloadShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
+	_ = s.store.RecordShareDownload(share.ID)
 	_ = s.store.LogAccess("share-download", share.Path, clientIP(r), r.UserAgent())
 	http.ServeFile(w, r, path)
 }
@@ -301,6 +305,7 @@ func (s *Server) openDirectLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	_ = s.store.RecordDirectLinkAccess(link.ID)
 	_ = s.store.LogAccess("direct", link.Path, clientIP(r), r.UserAgent())
 	http.ServeFile(w, r, path)
 }
@@ -320,6 +325,16 @@ func (s *Server) accessLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, logs)
+}
+
+func (s *Server) deleteAccessLogs(w http.ResponseWriter, r *http.Request) {
+	deleted, err := s.store.DeleteAccessLogs(queryInt(r, "olderThanDays", 0), queryBool(r, "all", false))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("logs-cleanup", strconv.FormatInt(deleted, 10), clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -373,6 +388,14 @@ func clientIP(r *http.Request) string {
 
 func queryInt(r *http.Request, key string, fallback int) int {
 	value, err := strconv.Atoi(r.URL.Query().Get(key))
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func queryBool(r *http.Request, key string, fallback bool) bool {
+	value, err := strconv.ParseBool(r.URL.Query().Get(key))
 	if err != nil {
 		return fallback
 	}

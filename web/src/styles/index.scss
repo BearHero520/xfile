@@ -283,11 +283,24 @@ h1 {
   margin-top: 18px;
 }
 
+.access-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
 .panel-heading {
   display: flex;
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
+}
+
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
 }
 
 .panel-title {
@@ -475,12 +488,21 @@ h1 {
 
   .log-filters .ep-form-item,
   .log-filters .ep-input,
-  .log-action-select {
+  .log-action-select,
+  .access-form-grid {
     width: 100%;
+  }
+
+  .access-form-grid {
+    grid-template-columns: 1fr;
   }
 
   .table-pagination {
     justify-content: flex-start;
     overflow-x: auto;
+  }
+
+  .panel-actions {
+    justify-content: flex-start;
   }
 }

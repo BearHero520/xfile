@@ -13,6 +13,9 @@ export interface ShareEntry {
   url: string
   protected: boolean
   expiresAt?: string
+  viewCount: number
+  downloadCount: number
+  lastAccessAt?: string
   createdAt: string
 }
 
@@ -35,6 +38,8 @@ export interface DirectLinkEntry {
   path: string
   url: string
   enabled: boolean
+  accessCount: number
+  lastAccessAt?: string
   createdAt: string
 }
 

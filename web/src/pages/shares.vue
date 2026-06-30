@@ -41,18 +41,33 @@ onMounted(loadShares)
             分享列表
           </div>
           <p class="lede">
-            管理公开分享、过期时间和访问入口。
+            管理公开分享、过期时间、访问入口和访问统计。
           </p>
         </div>
       </div>
       <el-table :data="shares" empty-text="暂无分享链接">
-        <el-table-column prop="path" label="文件路径" min-width="260" />
-        <el-table-column prop="url" label="分享地址" min-width="180" />
+        <el-table-column prop="path" label="文件路径" min-width="240" show-overflow-tooltip />
+        <el-table-column prop="url" label="分享地址" min-width="160" />
         <el-table-column label="密码" width="100">
           <template #default="{ row }">
             <el-tag :type="row.protected ? 'warning' : 'info'">
               {{ row.protected ? '有密码' : '公开' }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="访问" width="90">
+          <template #default="{ row }">
+            {{ row.viewCount || 0 }}
+          </template>
+        </el-table-column>
+        <el-table-column label="下载" width="90">
+          <template #default="{ row }">
+            {{ row.downloadCount || 0 }}
+          </template>
+        </el-table-column>
+        <el-table-column label="最近访问" width="160">
+          <template #default="{ row }">
+            {{ formatTime(row.lastAccessAt || '') }}
           </template>
         </el-table-column>
         <el-table-column label="有效期" width="140">
@@ -67,8 +82,8 @@ onMounted(loadShares)
         </el-table-column>
         <el-table-column label="操作" width="130" align="right">
           <template #default="{ row }">
-            <el-button text :icon="Link" @click="copyLink(row.url)" />
-            <el-button text type="danger" :icon="Delete" @click="removeShare(row.id)" />
+            <el-button text :icon="Link" title="复制链接" @click="copyLink(row.url)" />
+            <el-button text type="danger" :icon="Delete" title="删除" @click="removeShare(row.id)" />
           </template>
         </el-table-column>
       </el-table>

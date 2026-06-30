@@ -48,14 +48,24 @@ onMounted(loadLinks)
         直链 / 短链
       </div>
       <p class="lede">
-        为文件生成稳定直链、代理下载地址和短链入口。
+        为文件生成稳定直链、代理下载地址和访问统计。
       </p>
       <el-table :data="links" empty-text="暂无直链">
-        <el-table-column prop="path" label="文件路径" min-width="260" />
-        <el-table-column prop="url" label="直链地址" min-width="180" />
+        <el-table-column prop="path" label="文件路径" min-width="240" show-overflow-tooltip />
+        <el-table-column prop="url" label="直链地址" min-width="160" />
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
             <el-switch :model-value="row.enabled" @change="toggleLink(row)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="访问" width="90">
+          <template #default="{ row }">
+            {{ row.accessCount || 0 }}
+          </template>
+        </el-table-column>
+        <el-table-column label="最近访问" width="160">
+          <template #default="{ row }">
+            {{ formatTime(row.lastAccessAt || '') }}
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="160">
@@ -65,8 +75,8 @@ onMounted(loadLinks)
         </el-table-column>
         <el-table-column label="操作" width="130" align="right">
           <template #default="{ row }">
-            <el-button text :icon="Link" @click="copyLink(row.url)" />
-            <el-button text type="danger" :icon="Delete" @click="removeLink(row.id)" />
+            <el-button text :icon="Link" title="复制链接" @click="copyLink(row.url)" />
+            <el-button text type="danger" :icon="Delete" title="删除" @click="removeLink(row.id)" />
           </template>
         </el-table-column>
       </el-table>

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"xfile/internal/config"
 	"xfile/internal/database"
@@ -195,6 +196,118 @@ func TestShareDetailAndSharedFilePath(t *testing.T) {
 	}
 }
 
+func TestShareAndDirectLinkStats(t *testing.T) {
+	s := newTestStore(t)
+	file, err := s.FilePath("report.txt")
+	if err != nil {
+		t.Fatalf("file path: %v", err)
+	}
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	share, err := s.CreateShare("report.txt", "", "")
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+	if err := s.RecordShareView(share.ID); err != nil {
+		t.Fatalf("record share view: %v", err)
+	}
+	if err := s.RecordShareDownload(share.ID); err != nil {
+		t.Fatalf("record share download: %v", err)
+	}
+	shares, err := s.Shares()
+	if err != nil {
+		t.Fatalf("shares: %v", err)
+	}
+	if shares[0].ViewCount != 1 || shares[0].DownloadCount != 1 || shares[0].LastAccessAt == "" {
+		t.Fatalf("unexpected share stats: %#v", shares[0])
+	}
+
+	link, err := s.CreateDirectLink("report.txt")
+	if err != nil {
+		t.Fatalf("create direct link: %v", err)
+	}
+	if err := s.RecordDirectLinkAccess(link.ID); err != nil {
+		t.Fatalf("record direct link access: %v", err)
+	}
+	links, err := s.DirectLinks()
+	if err != nil {
+		t.Fatalf("direct links: %v", err)
+	}
+	if links[0].AccessCount != 1 || links[0].LastAccessAt == "" {
+		t.Fatalf("unexpected direct link stats: %#v", links[0])
+	}
+}
+
+func TestPrivatePathRules(t *testing.T) {
+	s := newTestStore(t)
+	privateDir, err := s.FilePath("secret")
+	if err != nil {
+		t.Fatalf("private path: %v", err)
+	}
+	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+		t.Fatalf("mkdir private: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(privateDir, "hidden.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write private file: %v", err)
+	}
+
+	publicDir, err := s.FilePath("public")
+	if err != nil {
+		t.Fatalf("public path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(publicDir, "private"), 0o755); err != nil {
+		t.Fatalf("mkdir nested private: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(publicDir, "readme.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write public file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(publicDir, "private", "hidden.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write nested private file: %v", err)
+	}
+
+	existingShare, err := s.CreateShare("secret/hidden.txt", "", "")
+	if err != nil {
+		t.Fatalf("create existing share before rule: %v", err)
+	}
+	existingLink, err := s.CreateDirectLink("secret/hidden.txt")
+	if err != nil {
+		t.Fatalf("create existing direct link before rule: %v", err)
+	}
+	parentShare, err := s.CreateShare("public", "", "")
+	if err != nil {
+		t.Fatalf("create parent share: %v", err)
+	}
+	if err := s.SaveSettings(map[string]string{"privatePathList": "secret\npublic/private"}); err != nil {
+		t.Fatalf("save private path rules: %v", err)
+	}
+
+	if _, err := s.CreateShare("secret/hidden.txt", "", ""); err == nil {
+		t.Fatal("expected private share creation to fail")
+	}
+	if _, err := s.CreateDirectLink("secret/hidden.txt"); err == nil {
+		t.Fatal("expected private direct link creation to fail")
+	}
+	if _, err := s.ResolveShare(existingShare.Token, ""); err == nil {
+		t.Fatal("expected existing private share to be blocked")
+	}
+	if _, err := s.ResolveDirectLink(existingLink.Token); err == nil {
+		t.Fatal("expected existing private direct link to be blocked")
+	}
+
+	detail, err := s.ShareDetail(parentShare.Token, "", "")
+	if err != nil {
+		t.Fatalf("parent share detail: %v", err)
+	}
+	if len(detail.Files) != 1 || detail.Files[0].Path != "public/readme.txt" {
+		t.Fatalf("private child was not filtered: %#v", detail.Files)
+	}
+	if _, err := s.ShareDetail(parentShare.Token, "", "private"); err == nil {
+		t.Fatal("expected private child browsing to fail")
+	}
+}
+
 func TestShareDetailNestedFolder(t *testing.T) {
 	s := newTestStore(t)
 	nested, err := s.FilePath("docs/manuals")
@@ -269,5 +382,39 @@ func TestSearchAccessLogs(t *testing.T) {
 	}
 	if capped.PageSize != 200 {
 		t.Fatalf("page size was not capped: %d", capped.PageSize)
+	}
+}
+
+func TestDeleteAccessLogs(t *testing.T) {
+	s := newTestStore(t)
+	oldTime := time.Now().AddDate(0, 0, -45).UTC().Format("2006-01-02 15:04:05")
+	newTime := time.Now().UTC().Format("2006-01-02 15:04:05")
+	if _, err := s.db.Exec(`INSERT INTO access_logs(action, path, ip, user_agent, created_at) VALUES
+		('download', 'old.txt', '127.0.0.1', 'test', ?),
+		('download', 'new.txt', '127.0.0.1', 'test', ?)`, oldTime, newTime); err != nil {
+		t.Fatalf("insert logs: %v", err)
+	}
+
+	deleted, err := s.DeleteAccessLogs(30, false)
+	if err != nil {
+		t.Fatalf("delete old logs: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted old logs = %d", deleted)
+	}
+	page, err := s.SearchAccessLogs(1, 10, "", "", "")
+	if err != nil {
+		t.Fatalf("search logs: %v", err)
+	}
+	if page.Total != 1 || page.Items[0].Path != "new.txt" {
+		t.Fatalf("remaining logs = %#v", page)
+	}
+
+	deleted, err = s.DeleteAccessLogs(0, true)
+	if err != nil {
+		t.Fatalf("delete all logs: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted all logs = %d", deleted)
 	}
 }

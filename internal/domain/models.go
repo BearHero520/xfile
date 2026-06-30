@@ -9,13 +9,16 @@ type FileEntry struct {
 }
 
 type Share struct {
-	ID        int64  `json:"id"`
-	Token     string `json:"token"`
-	Path      string `json:"path"`
-	URL       string `json:"url"`
-	Protected bool   `json:"protected"`
-	ExpiresAt string `json:"expiresAt,omitempty"`
-	CreatedAt string `json:"createdAt"`
+	ID            int64  `json:"id"`
+	Token         string `json:"token"`
+	Path          string `json:"path"`
+	URL           string `json:"url"`
+	Protected     bool   `json:"protected"`
+	ExpiresAt     string `json:"expiresAt,omitempty"`
+	ViewCount     int    `json:"viewCount"`
+	DownloadCount int    `json:"downloadCount"`
+	LastAccessAt  string `json:"lastAccessAt,omitempty"`
+	CreatedAt     string `json:"createdAt"`
 }
 
 type ShareDetail struct {
@@ -39,12 +42,14 @@ type User struct {
 }
 
 type DirectLink struct {
-	ID        int64  `json:"id"`
-	Token     string `json:"token"`
-	Path      string `json:"path"`
-	URL       string `json:"url"`
-	Enabled   bool   `json:"enabled"`
-	CreatedAt string `json:"createdAt"`
+	ID           int64  `json:"id"`
+	Token        string `json:"token"`
+	Path         string `json:"path"`
+	URL          string `json:"url"`
+	Enabled      bool   `json:"enabled"`
+	AccessCount  int    `json:"accessCount"`
+	LastAccessAt string `json:"lastAccessAt,omitempty"`
+	CreatedAt    string `json:"createdAt"`
 }
 
 type AccessLog struct {

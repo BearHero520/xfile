@@ -31,3 +31,27 @@ func TestSplitIPRules(t *testing.T) {
 		t.Fatalf("rules = %#v", rules)
 	}
 }
+
+func TestRefererHostAllowed(t *testing.T) {
+	tests := []struct {
+		name        string
+		refererHost string
+		requestHost string
+		rules       string
+		want        bool
+	}{
+		{name: "same host", refererHost: "xfile.example.com", requestHost: "xfile.example.com", want: true},
+		{name: "same host with port", refererHost: "xfile.example.com:443", requestHost: "xfile.example.com", want: true},
+		{name: "allowed domain", refererHost: "cdn.example.com", requestHost: "xfile.example.com", rules: "example.com", want: true},
+		{name: "allowed wildcard", refererHost: "assets.example.net", requestHost: "xfile.example.com", rules: "*.example.net", want: true},
+		{name: "blocked", refererHost: "other.test", requestHost: "xfile.example.com", rules: "example.com", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := refererHostAllowed(tt.refererHost, tt.requestHost, tt.rules); got != tt.want {
+				t.Fatalf("refererHostAllowed() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

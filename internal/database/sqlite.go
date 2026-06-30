@@ -71,6 +71,21 @@ func Migrate(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "shares", "password", "TEXT"); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(db, "shares", "view_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "shares", "download_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "shares", "last_access_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "direct_links", "access_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "direct_links", "last_access_at", "TEXT"); err != nil {
+		return err
+	}
 	return nil
 }
 

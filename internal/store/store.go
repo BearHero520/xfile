@@ -44,6 +44,9 @@ func (s *Store) Settings() (map[string]string, error) {
 		"maxUploadMB": "512",
 		"ipAllowList": "",
 		"ipDenyList":  "",
+		"privatePathList": "",
+		"refererProtection": "disabled",
+		"refererAllowList":  "",
 	}
 	for rows.Next() {
 		var key, value string
@@ -376,6 +379,9 @@ func (s *Store) CreateShare(path string, expiresAt string, password string) (dom
 	if _, err := s.safePath(path); err != nil {
 		return domain.Share{}, err
 	}
+	if err := s.ensurePublicPath(path); err != nil {
+		return domain.Share{}, err
+	}
 	token, err := randomToken()
 	if err != nil {
 		return domain.Share{}, err
@@ -389,7 +395,7 @@ func (s *Store) CreateShare(path string, expiresAt string, password string) (dom
 }
 
 func (s *Store) Shares() ([]domain.Share, error) {
-	rows, err := s.db.Query(`SELECT id, token, path, COALESCE(password, ''), COALESCE(expires_at, ''), created_at FROM shares ORDER BY created_at DESC LIMIT 50`)
+	rows, err := s.db.Query(`SELECT id, token, path, COALESCE(password, ''), COALESCE(expires_at, ''), view_count, download_count, COALESCE(last_access_at, ''), created_at FROM shares ORDER BY created_at DESC LIMIT 50`)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +404,7 @@ func (s *Store) Shares() ([]domain.Share, error) {
 	for rows.Next() {
 		var share domain.Share
 		var password string
-		if err := rows.Scan(&share.ID, &share.Token, &share.Path, &password, &share.ExpiresAt, &share.CreatedAt); err != nil {
+		if err := rows.Scan(&share.ID, &share.Token, &share.Path, &password, &share.ExpiresAt, &share.ViewCount, &share.DownloadCount, &share.LastAccessAt, &share.CreatedAt); err != nil {
 			return nil, err
 		}
 		share.URL = "/s/" + share.Token
@@ -416,11 +422,14 @@ func (s *Store) DeleteShare(id int64) error {
 func (s *Store) ResolveShare(token string, password string) (domain.Share, error) {
 	var share domain.Share
 	var storedPassword string
-	err := s.db.QueryRow(`SELECT id, token, path, COALESCE(password, ''), COALESCE(expires_at, ''), created_at
+	err := s.db.QueryRow(`SELECT id, token, path, COALESCE(password, ''), COALESCE(expires_at, ''), view_count, download_count, COALESCE(last_access_at, ''), created_at
 		FROM shares
 		WHERE token = ? AND (expires_at IS NULL OR expires_at = '' OR expires_at > CURRENT_TIMESTAMP)`, token).
-		Scan(&share.ID, &share.Token, &share.Path, &storedPassword, &share.ExpiresAt, &share.CreatedAt)
+		Scan(&share.ID, &share.Token, &share.Path, &storedPassword, &share.ExpiresAt, &share.ViewCount, &share.DownloadCount, &share.LastAccessAt, &share.CreatedAt)
 	if err != nil {
+		return domain.Share{}, err
+	}
+	if err := s.ensurePublicPath(share.Path); err != nil {
 		return domain.Share{}, err
 	}
 	if storedPassword != "" && !verifySharePassword(storedPassword, password) {
@@ -429,6 +438,16 @@ func (s *Store) ResolveShare(token string, password string) (domain.Share, error
 	share.URL = "/s/" + share.Token
 	share.Protected = storedPassword != ""
 	return share, nil
+}
+
+func (s *Store) RecordShareView(id int64) error {
+	_, err := s.db.Exec(`UPDATE shares SET view_count = view_count + 1, last_access_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) RecordShareDownload(id int64) error {
+	_, err := s.db.Exec(`UPDATE shares SET download_count = download_count + 1, last_access_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	return err
 }
 
 func (s *Store) ShareDetail(token string, password string, child string) (domain.ShareDetail, error) {
@@ -453,6 +472,9 @@ func (s *Store) ShareDetail(token string, password string, child string) (domain
 		return domain.ShareDetail{}, err
 	}
 	currentRel := cleanJoin(share.Path, cleanChild)
+	if err := s.ensurePublicPath(currentRel); err != nil {
+		return domain.ShareDetail{}, err
+	}
 	path, err := s.safePath(currentRel)
 	if err != nil {
 		return domain.ShareDetail{}, err
@@ -471,6 +493,7 @@ func (s *Store) ShareDetail(token string, password string, child string) (domain
 		if err != nil {
 			return domain.ShareDetail{}, err
 		}
+		files = s.filterPublicFiles(files)
 	}
 	return domain.ShareDetail{
 		Token:       share.Token,
@@ -509,7 +532,11 @@ func (s *Store) SharedFilePath(token, password, child string) (domain.Share, str
 	if err != nil {
 		return domain.Share{}, "", err
 	}
-	target, err := s.safePath(cleanJoin(share.Path, cleanChild))
+	targetRel := cleanJoin(share.Path, cleanChild)
+	if err := s.ensurePublicPath(targetRel); err != nil {
+		return domain.Share{}, "", err
+	}
+	target, err := s.safePath(targetRel)
 	if err != nil {
 		return domain.Share{}, "", err
 	}
@@ -526,6 +553,9 @@ func (s *Store) CreateDirectLink(path string) (domain.DirectLink, error) {
 	if _, err := s.safePath(path); err != nil {
 		return domain.DirectLink{}, err
 	}
+	if err := s.ensurePublicPath(path); err != nil {
+		return domain.DirectLink{}, err
+	}
 	token, err := randomToken()
 	if err != nil {
 		return domain.DirectLink{}, err
@@ -539,7 +569,7 @@ func (s *Store) CreateDirectLink(path string) (domain.DirectLink, error) {
 }
 
 func (s *Store) DirectLinks() ([]domain.DirectLink, error) {
-	rows, err := s.db.Query(`SELECT id, token, path, enabled, created_at FROM direct_links ORDER BY created_at DESC LIMIT 50`)
+	rows, err := s.db.Query(`SELECT id, token, path, enabled, access_count, COALESCE(last_access_at, ''), created_at FROM direct_links ORDER BY created_at DESC LIMIT 50`)
 	if err != nil {
 		return nil, err
 	}
@@ -548,7 +578,7 @@ func (s *Store) DirectLinks() ([]domain.DirectLink, error) {
 	for rows.Next() {
 		var link domain.DirectLink
 		var enabled int
-		if err := rows.Scan(&link.ID, &link.Token, &link.Path, &enabled, &link.CreatedAt); err != nil {
+		if err := rows.Scan(&link.ID, &link.Token, &link.Path, &enabled, &link.AccessCount, &link.LastAccessAt, &link.CreatedAt); err != nil {
 			return nil, err
 		}
 		link.URL = "/d/" + link.Token
@@ -575,14 +605,22 @@ func (s *Store) UpdateDirectLink(id int64, enabled bool) error {
 func (s *Store) ResolveDirectLink(token string) (domain.DirectLink, error) {
 	var link domain.DirectLink
 	var enabled int
-	err := s.db.QueryRow(`SELECT id, token, path, enabled, created_at FROM direct_links WHERE token = ? AND enabled = 1`, token).
-		Scan(&link.ID, &link.Token, &link.Path, &enabled, &link.CreatedAt)
+	err := s.db.QueryRow(`SELECT id, token, path, enabled, access_count, COALESCE(last_access_at, ''), created_at FROM direct_links WHERE token = ? AND enabled = 1`, token).
+		Scan(&link.ID, &link.Token, &link.Path, &enabled, &link.AccessCount, &link.LastAccessAt, &link.CreatedAt)
 	if err != nil {
+		return domain.DirectLink{}, err
+	}
+	if err := s.ensurePublicPath(link.Path); err != nil {
 		return domain.DirectLink{}, err
 	}
 	link.URL = "/d/" + link.Token
 	link.Enabled = enabled == 1
 	return link, nil
+}
+
+func (s *Store) RecordDirectLinkAccess(id int64) error {
+	_, err := s.db.Exec(`UPDATE direct_links SET access_count = access_count + 1, last_access_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
+	return err
 }
 
 func (s *Store) LogAccess(action, path, ip, userAgent string) error {
@@ -646,6 +684,46 @@ func (s *Store) SearchAccessLogs(page, pageSize int, action, path, ip string) (d
 	return domain.AccessLogPage{Items: logs, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
+func (s *Store) DeleteAccessLogs(olderThanDays int, all bool) (int64, error) {
+	if all {
+		res, err := s.db.Exec(`DELETE FROM access_logs`)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	}
+	if olderThanDays < 1 {
+		return 0, errors.New("olderThanDays must be at least 1")
+	}
+	threshold := time.Now().AddDate(0, 0, -olderThanDays).UTC().Format("2006-01-02 15:04:05")
+	res, err := s.db.Exec(`DELETE FROM access_logs WHERE created_at < ?`, threshold)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) ensurePublicPath(rel string) error {
+	if s.IsPrivatePath(rel) {
+		return errors.New("path is private")
+	}
+	return nil
+}
+
+func (s *Store) IsPrivatePath(rel string) bool {
+	return pathMatchesRules(rel, s.SettingValue("privatePathList", ""))
+}
+
+func (s *Store) filterPublicFiles(files []domain.FileEntry) []domain.FileEntry {
+	publicFiles := files[:0]
+	for _, file := range files {
+		if !s.IsPrivatePath(file.Path) {
+			publicFiles = append(publicFiles, file)
+		}
+	}
+	return publicFiles
+}
+
 func accessLogFilters(action, path, ip string) (string, []any) {
 	conditions := make([]string, 0, 3)
 	args := make([]any, 0, 3)
@@ -665,6 +743,37 @@ func accessLogFilters(action, path, ip string) (string, []any) {
 		return "", args
 	}
 	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+func pathMatchesRules(rel, rulesText string) bool {
+	path, err := cleanRelative(rel)
+	if err != nil {
+		return false
+	}
+	for _, rule := range splitPathRules(rulesText) {
+		if rule == "" || path == rule || strings.HasPrefix(path, rule+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func splitPathRules(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t'
+	})
+	rules := make([]string, 0, len(fields))
+	for _, field := range fields {
+		rawRule := strings.TrimSpace(field)
+		if rawRule == "" {
+			continue
+		}
+		rule, err := cleanRelative(rawRule)
+		if err == nil {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
 }
 
 func (s *Store) safePath(rel string) (string, error) {

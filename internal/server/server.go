@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"golang.org/x/net/webdav"
 	"xfile/internal/config"
 	"xfile/internal/store"
 )
@@ -13,10 +14,17 @@ type Server struct {
 	mux           *http.ServeMux
 	sessionSecret string
 	downloads     downloadRateLimiter
+	davLocks      webdav.LockSystem
 }
 
 func New(cfg config.Config, appStore *store.Store) *Server {
-	s := &Server{cfg: cfg, store: appStore, mux: http.NewServeMux(), sessionSecret: newSessionSecret(cfg.SessionSecret)}
+	s := &Server{
+		cfg:           cfg,
+		store:         appStore,
+		mux:           http.NewServeMux(),
+		sessionSecret: newSessionSecret(cfg.SessionSecret),
+		davLocks:      webdav.NewMemLS(),
+	}
 	s.routes()
 	return s
 }
@@ -66,5 +74,5 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/settings", s.private(s.saveSettings))
 	s.mux.HandleFunc("GET /s/{token}", s.sharePage)
 	s.mux.HandleFunc("GET /d/{token}", s.publicLinkControlled(s.openDirectLink))
-	s.mux.Handle("/", spaHandler(s.cfg.StaticDir))
+	s.mux.Handle("/", s.webDAVOrSPA())
 }

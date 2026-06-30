@@ -17,7 +17,9 @@ const form = reactive({
   webdav: 'disabled',
   webdavMountPath: '/dav',
   webdavReadOnly: 'disabled',
+  webdavAllowAnonymous: 'disabled',
   webdavUsername: '',
+  webdavPassword: '',
 })
 
 const origin = computed(() => window.location.origin)
@@ -35,7 +37,9 @@ async function loadSettings() {
     form.webdav = settings.webdav || 'disabled'
     form.webdavMountPath = settings.webdavMountPath || '/dav'
     form.webdavReadOnly = settings.webdavReadOnly || 'disabled'
+    form.webdavAllowAnonymous = settings.webdavAllowAnonymous || 'disabled'
     form.webdavUsername = settings.webdavUsername || ''
+    form.webdavPassword = settings.webdavPassword || ''
   }
   finally {
     loading.value = false
@@ -51,7 +55,9 @@ async function saveSettings() {
         webdav: form.webdav,
         webdavMountPath: normalizedMountPath.value,
         webdavReadOnly: form.webdavReadOnly,
+        webdavAllowAnonymous: form.webdavAllowAnonymous,
         webdavUsername: form.webdavUsername.trim(),
+        webdavPassword: form.webdavPassword,
       }),
     })
     form.webdavMountPath = normalizedMountPath.value
@@ -83,7 +89,7 @@ onMounted(loadSettings)
         </p>
       </div>
       <el-tag :type="isEnabled ? 'warning' : 'info'" effect="plain">
-        {{ isEnabled ? '配置已启用 / 协议待接入' : '未启用' }}
+        {{ isEnabled ? '服务已启用' : '未启用' }}
       </el-tag>
     </section>
 
@@ -96,7 +102,7 @@ onMounted(loadSettings)
               <span>服务配置</span>
             </div>
             <p class="lede">
-              当前页面保存的是 WebDAV 策略配置；后端协议处理器接入后会复用这些设置。
+              WebDAV 使用独立账号密码或匿名访问策略，客户端通过挂载地址连接本地文件存储。
             </p>
           </div>
         </div>
@@ -109,6 +115,9 @@ onMounted(loadSettings)
             <el-form-item label="只读模式">
               <el-switch v-model="form.webdavReadOnly" active-value="enabled" inactive-value="disabled" />
             </el-form-item>
+            <el-form-item label="匿名访问">
+              <el-switch v-model="form.webdavAllowAnonymous" active-value="enabled" inactive-value="disabled" />
+            </el-form-item>
           </div>
 
           <div class="access-form-grid">
@@ -116,7 +125,10 @@ onMounted(loadSettings)
               <el-input v-model="form.webdavMountPath" placeholder="/dav" />
             </el-form-item>
             <el-form-item label="账号名">
-              <el-input v-model="form.webdavUsername" placeholder="留空表示使用管理员账号策略" />
+              <el-input v-model="form.webdavUsername" placeholder="WebDAV 账号" />
+            </el-form-item>
+            <el-form-item label="密码">
+              <el-input v-model="form.webdavPassword" type="password" show-password autocomplete="off" />
             </el-form-item>
           </div>
 
@@ -149,15 +161,15 @@ onMounted(loadSettings)
             </div>
             <div class="status-row done">
               <el-icon><CircleCheck /></el-icon>
-              <span>开关、路径、只读策略可保存</span>
+              <span>挂载路径、只读策略和匿名访问可配置</span>
             </div>
-            <div class="status-row pending">
-              <el-icon><Warning /></el-icon>
-              <span>WebDAV 协议处理器尚未接入</span>
+            <div class="status-row done">
+              <el-icon><CircleCheck /></el-icon>
+              <span>WebDAV 协议处理器已接入</span>
             </div>
-            <div class="status-row pending">
+            <div class="status-row done">
               <el-icon><Lock /></el-icon>
-              <span>独立账号与权限模型待实现</span>
+              <span>独立账号密码已启用</span>
             </div>
           </div>
         </section>

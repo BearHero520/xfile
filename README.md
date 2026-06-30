@@ -12,21 +12,17 @@ XFile is a self-hosted file management service. The backend lives at the reposit
 
 ## Feature Reference
 
-ZFile demo core features:
-
-- Multiple storage sources and file browsing.
-- Site settings, logo, root path name, backend URL, and upload concurrency.
-- Share list, direct links, short links, download logs, and rankings.
-- Upload rules, display rules, user rules, and access control.
-- WebDAV, user management, SSO, security settings, and system logs.
-
-Zdir Pro core features:
+Planned and implemented file-service features:
 
 - Public/private file indexing.
 - File upload, download, copy, move, rename, and delete.
 - Online preview for images, audio, video, and documents.
 - Text editing, file descriptions, and global search.
 - Share links with expiration time.
+- Multiple storage sources and file browsing.
+- Site settings, root path name, backend URL, and upload controls.
+- Share list, direct links, short links, download logs, and rankings.
+- Upload rules, display rules, user rules, and access control.
 - WebDAV server and S3/WebDAV external storage mounts.
 - Online archive extraction, offline download, music list, HTML tools, and API.
 

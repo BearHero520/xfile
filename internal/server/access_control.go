@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -276,13 +277,33 @@ func validateAccessSettings(settings map[string]string) error {
 			return err
 		}
 	}
+	if value, ok := settings["webdavAllowAnonymous"]; ok {
+		if err := validateSwitch(value, "WebDAV 匿名访问"); err != nil {
+			return err
+		}
+	}
 	if value, ok := settings["webdavMountPath"]; ok {
-		value = strings.TrimSpace(value)
-		if value == "" || !strings.HasPrefix(value, "/") || strings.Contains(value, "..") || strings.ContainsAny(value, "?#") {
+		mountPath, err := validateWebDAVMountPath(value)
+		if err != nil {
+			return err
+		}
+		if mountPath == "/" || mountPath == "/api" || strings.HasPrefix(mountPath, "/api/") || mountPath == "/s" || strings.HasPrefix(mountPath, "/s/") || mountPath == "/d" || strings.HasPrefix(mountPath, "/d/") {
 			return errors.New("WebDAV 挂载路径必须是有效的绝对路径")
 		}
 	}
 	return nil
+}
+
+func validateWebDAVMountPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || !strings.HasPrefix(value, "/") || strings.Contains(value, "..") || strings.ContainsAny(value, "?#") {
+		return "", errors.New("WebDAV 挂载路径必须是有效的绝对路径")
+	}
+	clean := path.Clean(value)
+	if clean == "." {
+		return "", errors.New("WebDAV 挂载路径必须是有效的绝对路径")
+	}
+	return clean, nil
 }
 
 func validateSwitch(value, label string) error {

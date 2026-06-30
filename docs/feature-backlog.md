@@ -1,6 +1,6 @@
 # XFile Feature Backlog
 
-This file tracks the remaining ZFile-inspired features to add while keeping XFile's own UI style.
+This file tracks remaining file-service features while keeping XFile's own UI style.
 
 ## Phase 1 - Storage Sources
 
@@ -46,11 +46,11 @@ This file tracks the remaining ZFile-inspired features to add while keeping XFil
 
 ## Phase 6 - WebDAV Server
 
-- [ ] Real WebDAV protocol implementation.
-- [ ] WebDAV account and password handling.
-- [ ] WebDAV mount path support.
-- [ ] WebDAV read-only policy.
-- [ ] WebDAV anonymous access policy.
+- [x] Real WebDAV protocol implementation.
+- [x] WebDAV account and password handling.
+- [x] WebDAV mount path support.
+- [x] WebDAV read-only policy.
+- [x] WebDAV anonymous access policy.
 
 ## Phase 7 - Security
 

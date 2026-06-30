@@ -41,13 +41,13 @@ On first use, visit `/login` and initialize the system super administrator accou
 - Direct links with enable/disable support.
 - Access logging for file operations, shares, and direct links.
 - Dashboard summary for file count, folder count, storage usage, shares, recent files, and logs.
-- Vue pages for first-use setup/login, file management, public share landing, shares, direct links, logs, settings, rules, uploads, access, and WebDAV placeholder.
+- Vue pages for first-use setup/login, file management, public share landing, shares, direct links, logs, settings, rules, uploads, access, and WebDAV configuration.
+- WebDAV server mounted at the configured path with independent account/password, optional anonymous access, and read-only policy support.
 - Dockerfile builds `web/dist` and embeds it in the Go runtime image.
 - GitHub Actions runs Go tests, frontend typecheck/build, then Docker image build/publish.
 
 ## Known Missing Features / Backlog
 
-- Real WebDAV protocol implementation, account management, permissions, and mount paths.
 - Multiple storage sources such as S3, MinIO, external WebDAV, or cloud drive mounts.
 - Online previews for images, video, audio, PDF, text, and office documents.
 - Text editing and richer file metadata/descriptions.

@@ -27,8 +27,7 @@ ENV XFILE_ADDR=:3008 \
   XFILE_DATA_DIR=/app/data \
   XFILE_FILES_DIR=/app/data/files \
   XFILE_DB=/app/data/xfile.db \
-  XFILE_STATIC_DIR=/app/web/dist \
-  XFILE_SESSION_SECRET=
+  XFILE_STATIC_DIR=/app/web/dist
 EXPOSE 3008
 VOLUME ["/app/data"]
 CMD ["/app/xfile"]

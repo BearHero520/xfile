@@ -58,8 +58,7 @@ jobs:
       contents: read
       packages: write
     env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_IMAGE: bearhero/xfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,11 +79,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check Docker Hub token
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "Missing repository secret: DOCKERHUB_TOKEN"
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: bearhero
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
+          images: |
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
+            ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -98,31 +115,3 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-      - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
-
-      - name: Extract Docker Hub metadata
-        if: github.event_name != 'pull_request' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-        id: dockerhub-meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKERHUB_USERNAME }}/xfile
-          tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push to Docker Hub
-        if: github.event_name != 'pull_request' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.dockerhub-meta.outputs.tags }}
-          labels: ${{ steps.dockerhub-meta.outputs.labels }}

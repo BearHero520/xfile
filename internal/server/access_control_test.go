@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestIPMatchesRules(t *testing.T) {
 	tests := []struct {
@@ -51,6 +54,62 @@ func TestRefererHostAllowed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := refererHostAllowed(tt.refererHost, tt.requestHost, tt.rules); got != tt.want {
 				t.Fatalf("refererHostAllowed() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDownloadRateLimiter(t *testing.T) {
+	limiter := downloadRateLimiter{}
+	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+
+	if !limiter.allow("127.0.0.1", 2, now) {
+		t.Fatal("first download should be allowed")
+	}
+	if !limiter.allow("127.0.0.1", 2, now.Add(10*time.Second)) {
+		t.Fatal("second download should be allowed")
+	}
+	if limiter.allow("127.0.0.1", 2, now.Add(20*time.Second)) {
+		t.Fatal("third download inside window should be blocked")
+	}
+	if !limiter.allow("127.0.0.1", 2, now.Add(61*time.Second)) {
+		t.Fatal("download after window should be allowed")
+	}
+}
+
+func TestValidateAccessSettings(t *testing.T) {
+	valid := map[string]string{
+		"ipAllowList":            "127.0.0.1\n10.0.0.0/8",
+		"ipDenyList":             "2001:db8::/32",
+		"refererProtection":      "enabled",
+		"refererAllowList":       "example.com\n*.cdn.example.com\nhttps://static.example.net",
+		"downloadLimitPerMinute": "12",
+		"webdav":                 "enabled",
+		"webdavReadOnly":         "disabled",
+		"webdavMountPath":        "/dav",
+	}
+	if err := validateAccessSettings(valid); err != nil {
+		t.Fatalf("valid access settings failed: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		settings map[string]string
+	}{
+		{name: "invalid allow ip", settings: map[string]string{"ipAllowList": "bad-ip"}},
+		{name: "invalid cidr", settings: map[string]string{"ipDenyList": "10.0.0.0/99"}},
+		{name: "invalid referer switch", settings: map[string]string{"refererProtection": "yes"}},
+		{name: "invalid referer url", settings: map[string]string{"refererAllowList": "https://"}},
+		{name: "negative download limit", settings: map[string]string{"downloadLimitPerMinute": "-1"}},
+		{name: "text download limit", settings: map[string]string{"downloadLimitPerMinute": "many"}},
+		{name: "invalid webdav switch", settings: map[string]string{"webdav": "on"}},
+		{name: "invalid webdav readonly switch", settings: map[string]string{"webdavReadOnly": "off"}},
+		{name: "invalid webdav mount path", settings: map[string]string{"webdavMountPath": "dav"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateAccessSettings(tt.settings); err == nil {
+				t.Fatal("expected validation to fail")
 			}
 		})
 	}

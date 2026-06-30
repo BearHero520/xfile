@@ -39,6 +39,9 @@ func (s *Store) Settings() (map[string]string, error) {
 		"siteName":    s.cfg.SiteName,
 		"rootName":    "首页",
 		"webdav":      "disabled",
+		"webdavMountPath": "/dav",
+		"webdavReadOnly":  "disabled",
+		"webdavUsername":  "",
 		"publicIndex": "disabled",
 		"allowUpload": "enabled",
 		"maxUploadMB": "512",
@@ -47,6 +50,7 @@ func (s *Store) Settings() (map[string]string, error) {
 		"privatePathList": "",
 		"refererProtection": "disabled",
 		"refererAllowList":  "",
+		"downloadLimitPerMinute": "0",
 	}
 	for rows.Next() {
 		var key, value string
@@ -645,7 +649,7 @@ func (s *Store) AccessLogs(limit int) ([]domain.AccessLog, error) {
 	return logs, rows.Err()
 }
 
-func (s *Store) SearchAccessLogs(page, pageSize int, action, path, ip string) (domain.AccessLogPage, error) {
+func (s *Store) SearchAccessLogs(page, pageSize int, action, path, ip, userAgent, startTime, endTime string) (domain.AccessLogPage, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -656,7 +660,7 @@ func (s *Store) SearchAccessLogs(page, pageSize int, action, path, ip string) (d
 		pageSize = 200
 	}
 
-	where, args := accessLogFilters(action, path, ip)
+	where, args := accessLogFilters(action, path, ip, userAgent, startTime, endTime)
 	var total int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM access_logs`+where, args...).Scan(&total); err != nil {
 		return domain.AccessLogPage{}, err
@@ -724,9 +728,9 @@ func (s *Store) filterPublicFiles(files []domain.FileEntry) []domain.FileEntry {
 	return publicFiles
 }
 
-func accessLogFilters(action, path, ip string) (string, []any) {
-	conditions := make([]string, 0, 3)
-	args := make([]any, 0, 3)
+func accessLogFilters(action, path, ip, userAgent, startTime, endTime string) (string, []any) {
+	conditions := make([]string, 0, 6)
+	args := make([]any, 0, 6)
 	if action = strings.TrimSpace(action); action != "" {
 		conditions = append(conditions, "action = ?")
 		args = append(args, action)
@@ -738,6 +742,18 @@ func accessLogFilters(action, path, ip string) (string, []any) {
 	if ip = strings.TrimSpace(ip); ip != "" {
 		conditions = append(conditions, "ip LIKE ?")
 		args = append(args, "%"+ip+"%")
+	}
+	if userAgent = strings.TrimSpace(userAgent); userAgent != "" {
+		conditions = append(conditions, "user_agent LIKE ?")
+		args = append(args, "%"+userAgent+"%")
+	}
+	if startTime = strings.TrimSpace(startTime); startTime != "" {
+		conditions = append(conditions, "created_at >= ?")
+		args = append(args, startTime)
+	}
+	if endTime = strings.TrimSpace(endTime); endTime != "" {
+		conditions = append(conditions, "created_at <= ?")
+		args = append(args, endTime)
 	}
 	if len(conditions) == 0 {
 		return "", args

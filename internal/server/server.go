@@ -12,6 +12,7 @@ type Server struct {
 	store         *store.Store
 	mux           *http.ServeMux
 	sessionSecret string
+	downloads     downloadRateLimiter
 }
 
 func New(cfg config.Config, appStore *store.Store) *Server {

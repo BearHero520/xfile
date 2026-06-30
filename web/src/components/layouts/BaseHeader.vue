@@ -17,10 +17,10 @@ async function logout() {
       <span class="brand-mark">XF</span>
       <span>XFile</span>
     </RouterLink>
-    <div class="header-search">
+    <RouterLink class="header-search" to="/search">
       <el-icon><Search /></el-icon>
       <span>搜索文件、分享、直链与日志</span>
-    </div>
+    </RouterLink>
     <div class="header-actions">
       <el-button :icon="Bell" circle title="通知" />
       <el-button circle title="切换主题" @click="toggleDark()">

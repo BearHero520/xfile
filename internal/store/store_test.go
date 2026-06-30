@@ -357,7 +357,7 @@ func TestSearchAccessLogs(t *testing.T) {
 		}
 	}
 
-	filtered, err := s.SearchAccessLogs(1, 1, "download", "docs", "127.")
+	filtered, err := s.SearchAccessLogs(1, 1, "download", "docs", "127.", "", "", "")
 	if err != nil {
 		t.Fatalf("search logs: %v", err)
 	}
@@ -368,7 +368,17 @@ func TestSearchAccessLogs(t *testing.T) {
 		t.Fatalf("unexpected filtered path: %s", filtered.Items[0].Path)
 	}
 
-	page, err := s.SearchAccessLogs(2, 2, "", "", "")
+	startTime := time.Now().AddDate(0, 0, -1).UTC().Format("2006-01-02 15:04:05")
+	endTime := time.Now().AddDate(0, 0, 1).UTC().Format("2006-01-02 15:04:05")
+	agentFiltered, err := s.SearchAccessLogs(1, 10, "", "", "", "test-agent", startTime, endTime)
+	if err != nil {
+		t.Fatalf("search logs by agent and time: %v", err)
+	}
+	if agentFiltered.Total != 3 {
+		t.Fatalf("agent/time filtered logs = %#v", agentFiltered)
+	}
+
+	page, err := s.SearchAccessLogs(2, 2, "", "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("paged logs: %v", err)
 	}
@@ -376,7 +386,7 @@ func TestSearchAccessLogs(t *testing.T) {
 		t.Fatalf("paged logs = %#v", page)
 	}
 
-	capped, err := s.SearchAccessLogs(1, 500, "", "", "")
+	capped, err := s.SearchAccessLogs(1, 500, "", "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("capped logs: %v", err)
 	}
@@ -402,7 +412,7 @@ func TestDeleteAccessLogs(t *testing.T) {
 	if deleted != 1 {
 		t.Fatalf("deleted old logs = %d", deleted)
 	}
-	page, err := s.SearchAccessLogs(1, 10, "", "", "")
+	page, err := s.SearchAccessLogs(1, 10, "", "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("search logs: %v", err)
 	}

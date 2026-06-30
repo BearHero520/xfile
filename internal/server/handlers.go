@@ -121,6 +121,9 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if !s.enforceDownloadLimit(w, r, rel) {
+		return
+	}
 	_ = s.store.LogAccess("download", rel, clientIP(r), r.UserAgent())
 	http.ServeFile(w, r, path)
 }
@@ -216,8 +219,15 @@ func (s *Server) downloadShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
+	downloadPath := share.Path
+	if child := strings.TrimSpace(r.URL.Query().Get("path")); child != "" {
+		downloadPath = strings.Trim(downloadPath+"/"+child, "/")
+	}
+	if !s.enforceDownloadLimit(w, r, downloadPath) {
+		return
+	}
 	_ = s.store.RecordShareDownload(share.ID)
-	_ = s.store.LogAccess("share-download", share.Path, clientIP(r), r.UserAgent())
+	_ = s.store.LogAccess("share-download", downloadPath, clientIP(r), r.UserAgent())
 	http.ServeFile(w, r, path)
 }
 
@@ -305,6 +315,9 @@ func (s *Server) openDirectLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if !s.enforceDownloadLimit(w, r, link.Path) {
+		return
+	}
 	_ = s.store.RecordDirectLinkAccess(link.ID)
 	_ = s.store.LogAccess("direct", link.Path, clientIP(r), r.UserAgent())
 	http.ServeFile(w, r, path)
@@ -319,6 +332,9 @@ func (s *Server) accessLogs(w http.ResponseWriter, r *http.Request) {
 		r.URL.Query().Get("action"),
 		r.URL.Query().Get("path"),
 		r.URL.Query().Get("ip"),
+		r.URL.Query().Get("userAgent"),
+		r.URL.Query().Get("startTime"),
+		r.URL.Query().Get("endTime"),
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -349,6 +365,10 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	var req map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := validateAccessSettings(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

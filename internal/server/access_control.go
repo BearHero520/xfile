@@ -2,11 +2,20 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+type downloadRateLimiter struct {
+	mu   sync.Mutex
+	hits map[string][]time.Time
+}
 
 func (s *Server) accessControlled(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +66,43 @@ func (s *Server) refererAllowed(r *http.Request) bool {
 		return false
 	}
 	return refererHostAllowed(parsed.Host, r.Host, s.store.SettingValue("refererAllowList", ""))
+}
+
+func (s *Server) enforceDownloadLimit(w http.ResponseWriter, r *http.Request, path string) bool {
+	limit, err := strconv.Atoi(s.store.SettingValue("downloadLimitPerMinute", "0"))
+	if err != nil || limit < 1 {
+		return true
+	}
+	if s.downloads.allow(clientIP(r), limit, time.Now()) {
+		return true
+	}
+	_ = s.store.LogAccess("download-rate-limited", path, clientIP(r), r.UserAgent())
+	writeError(w, http.StatusTooManyRequests, errors.New("download rate limit exceeded"))
+	return false
+}
+
+func (l *downloadRateLimiter) allow(key string, limit int, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.hits == nil {
+		l.hits = make(map[string][]time.Time)
+	}
+	windowStart := now.Add(-time.Minute)
+	hits := l.hits[key]
+	kept := hits[:0]
+	for _, hit := range hits {
+		if hit.After(windowStart) {
+			kept = append(kept, hit)
+		}
+	}
+	if len(kept) >= limit {
+		l.hits[key] = kept
+		return false
+	}
+	kept = append(kept, now)
+	l.hits[key] = kept
+	return true
 }
 
 func refererHostAllowed(refererHost, requestHost, rulesText string) bool {
@@ -149,4 +195,91 @@ func splitIPRules(value string) []string {
 		}
 	}
 	return rules
+}
+
+func validateAccessSettings(settings map[string]string) error {
+	if value, ok := settings["ipAllowList"]; ok {
+		if err := validateIPRuleList(value, "IP 白名单"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["ipDenyList"]; ok {
+		if err := validateIPRuleList(value, "IP 黑名单"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["refererProtection"]; ok {
+		value = strings.TrimSpace(value)
+		if value != "enabled" && value != "disabled" {
+			return errors.New("Referer 防盗链只能是 enabled 或 disabled")
+		}
+	}
+	if value, ok := settings["refererAllowList"]; ok {
+		if err := validateRefererRuleList(value); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["downloadLimitPerMinute"]; ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || limit < 0 {
+			return errors.New("下载限频必须是大于或等于 0 的整数")
+		}
+	}
+	if value, ok := settings["webdav"]; ok {
+		value = strings.TrimSpace(value)
+		if value != "enabled" && value != "disabled" {
+			return errors.New("WebDAV 开关只能是 enabled 或 disabled")
+		}
+	}
+	if value, ok := settings["webdavReadOnly"]; ok {
+		value = strings.TrimSpace(value)
+		if value != "enabled" && value != "disabled" {
+			return errors.New("WebDAV 只读模式只能是 enabled 或 disabled")
+		}
+	}
+	if value, ok := settings["webdavMountPath"]; ok {
+		value = strings.TrimSpace(value)
+		if value == "" || !strings.HasPrefix(value, "/") || strings.Contains(value, "..") || strings.ContainsAny(value, "?#") {
+			return errors.New("WebDAV 挂载路径必须是有效的绝对路径")
+		}
+	}
+	return nil
+}
+
+func validateIPRuleList(value, label string) error {
+	for _, rule := range splitIPRules(value) {
+		if strings.Contains(rule, "/") {
+			if _, _, err := net.ParseCIDR(rule); err != nil {
+				return fmt.Errorf("%s包含无效 CIDR：%s", label, rule)
+			}
+			continue
+		}
+		if net.ParseIP(rule) == nil {
+			return fmt.Errorf("%s包含无效 IP：%s", label, rule)
+		}
+	}
+	return nil
+}
+
+func validateRefererRuleList(value string) error {
+	for _, rule := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	}) {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			continue
+		}
+		if strings.Contains(rule, "://") {
+			parsed, err := url.Parse(rule)
+			if err != nil || parsed.Host == "" {
+				return fmt.Errorf("允许来源域名包含无效 URL：%s", rule)
+			}
+			rule = parsed.Host
+		}
+		host := cleanHost(strings.TrimPrefix(rule, "*."))
+		if host == "" || strings.ContainsAny(host, "/?#") {
+			return fmt.Errorf("允许来源域名包含无效规则：%s", rule)
+		}
+	}
+	return nil
 }

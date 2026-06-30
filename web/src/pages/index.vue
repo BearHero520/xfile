@@ -14,10 +14,16 @@ import {
   Search,
   Share,
   Upload,
+  View,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { api, fileUrl, formatBytes, formatTime } from '~/api'
+
+type PreviewKind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'unsupported'
+
+const route = useRoute()
 
 const emptyDashboard: Dashboard = {
   siteName: 'XFile',
@@ -43,6 +49,11 @@ const keyword = ref('')
 const searchMode = ref<'current' | 'global'>('current')
 const globalResults = ref<FileEntry[]>([])
 const uploader = ref<HTMLInputElement>()
+const previewVisible = ref(false)
+const previewFile = ref<FileEntry>()
+const previewKind = ref<PreviewKind>('unsupported')
+const previewText = ref('')
+const previewLoading = ref(false)
 
 const searchModeOptions = [
   { label: '当前目录', value: 'current' },
@@ -57,8 +68,6 @@ const displayedFiles = computed(() => {
     return files.value
   return files.value.filter(file => `${file.name} ${file.path}`.toLowerCase().includes(term))
 })
-
-const filteredFiles = displayedFiles
 
 const fileEmptyText = computed(() => {
   if (searchMode.value === 'global' && keyword.value.trim())
@@ -123,16 +132,88 @@ function changeSearchMode() {
   void runSearch()
 }
 
+function openFolder(file: FileEntry) {
+  activePath.value = file.path
+  searchMode.value = 'current'
+  keyword.value = ''
+  globalResults.value = []
+  void loadAll()
+}
+
 function openFile(file: FileEntry) {
   if (file.type === 'folder') {
-    activePath.value = file.path
-    searchMode.value = 'current'
-    keyword.value = ''
-    globalResults.value = []
-    loadAll()
+    openFolder(file)
+    return
+  }
+  if (previewType(file) !== 'unsupported') {
+    void openPreview(file)
     return
   }
   window.open(fileUrl(file.path), '_blank')
+}
+
+function fileExtension(file: FileEntry) {
+  const name = file.name || file.path
+  const index = name.lastIndexOf('.')
+  return index >= 0 ? name.slice(index + 1).toLowerCase() : ''
+}
+
+function previewType(file: FileEntry): PreviewKind {
+  if (file.type === 'folder')
+    return 'unsupported'
+  const ext = fileExtension(file)
+  if (['apng', 'avif', 'bmp', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'webp'].includes(ext))
+    return 'image'
+  if (['mp4', 'm4v', 'mov', 'ogg', 'ogv', 'webm'].includes(ext))
+    return 'video'
+  if (['aac', 'flac', 'm4a', 'mp3', 'oga', 'ogg', 'wav', 'webm'].includes(ext))
+    return 'audio'
+  if (ext === 'pdf')
+    return 'pdf'
+  if (['css', 'csv', 'env', 'go', 'html', 'ini', 'js', 'json', 'log', 'md', 'scss', 'sql', 'svg', 'text', 'toml', 'ts', 'txt', 'vue', 'xml', 'yaml', 'yml'].includes(ext))
+    return 'text'
+  return 'unsupported'
+}
+
+function canPreview(file: FileEntry) {
+  return previewType(file) !== 'unsupported'
+}
+
+async function openPreview(file: FileEntry) {
+  const kind = previewType(file)
+  if (kind === 'unsupported') {
+    window.open(fileUrl(file.path), '_blank')
+    return
+  }
+  previewFile.value = file
+  previewKind.value = kind
+  previewText.value = ''
+  previewVisible.value = true
+  if (kind !== 'text')
+    return
+
+  previewLoading.value = true
+  try {
+    if (file.size > 2 * 1024 * 1024) {
+      previewText.value = '文本文件超过 2 MB，请下载后查看。'
+      return
+    }
+    const res = await fetch(fileUrl(file.path), { credentials: 'same-origin' })
+    if (!res.ok)
+      throw new Error(await res.text() || res.statusText)
+    previewText.value = await res.text()
+  }
+  catch (error) {
+    previewText.value = error instanceof Error ? error.message : '文本预览失败'
+  }
+  finally {
+    previewLoading.value = false
+  }
+}
+
+function downloadPreview() {
+  if (previewFile.value)
+    window.open(fileUrl(previewFile.value.path), '_blank')
 }
 
 async function uploadFile(event: Event) {
@@ -209,7 +290,12 @@ async function removeFile(file: FileEntry) {
   await loadAll()
 }
 
-onMounted(loadAll)
+onMounted(() => {
+  const path = route.query.path
+  if (typeof path === 'string')
+    activePath.value = path
+  void loadAll()
+})
 </script>
 
 <template>
@@ -221,7 +307,7 @@ onMounted(loadAll)
         </p>
         <h1>{{ dashboard.siteName }}</h1>
         <p class="lede">
-          统一管理本地存储、分享链接、直链、访问日志与规则能力。
+          统一管理本地存储、分享链接、直链、访问日志与访问规则。
         </p>
       </div>
       <div class="quick-actions">
@@ -288,7 +374,7 @@ onMounted(loadAll)
           </div>
         </div>
 
-        <el-table :data="filteredFiles" class="file-table" empty-text="当前目录暂无文件">
+        <el-table :data="displayedFiles" class="file-table" :empty-text="fileEmptyText">
           <el-table-column label="文件名" min-width="260">
             <template #default="{ row }">
               <button class="file-name" @click="openFile(row)">
@@ -310,8 +396,9 @@ onMounted(loadAll)
               {{ formatTime(row.modifiedAt) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="280" align="right">
+          <el-table-column label="操作" width="320" align="right">
             <template #default="{ row }">
+              <el-button v-if="row.type === 'file' && canPreview(row)" text :icon="View" title="预览" @click="openPreview(row)" />
               <el-button text :icon="Download" title="下载" @click="openFile(row)" />
               <el-button text :icon="Share" title="分享" @click="createShare(row)" />
               <el-button text :icon="Link" title="直链" @click="createDirectLink(row)" />
@@ -346,8 +433,8 @@ onMounted(loadAll)
           </div>
           <div v-for="log in logs.slice(0, 5)" :key="log.id" class="list-row">
             <div>
-              <strong>{{ log.action }} · {{ log.path || '/' }}</strong>
-              <span>{{ log.ip }} · {{ formatTime(log.createdAt) }}</span>
+              <strong>{{ log.action }} / {{ log.path || '/' }}</strong>
+              <span>{{ log.ip }} / {{ formatTime(log.createdAt) }}</span>
             </div>
           </div>
         </section>
@@ -363,7 +450,7 @@ onMounted(loadAll)
         <div v-for="share in shares.slice(0, 5)" :key="share.id" class="list-row">
           <div>
             <strong>{{ share.path }}</strong>
-            <span>{{ share.url }} · {{ share.protected ? '有密码' : '公开' }}</span>
+            <span>{{ share.url }} / {{ share.protected ? '有密码' : '公开' }}</span>
           </div>
           <el-tag size="small">
             {{ share.expiresAt || '长期有效' }}
@@ -379,10 +466,26 @@ onMounted(loadAll)
         <div v-for="file in dashboard.recentFiles" :key="file.path" class="list-row">
           <div>
             <strong>{{ file.path }}</strong>
-            <span>{{ formatBytes(file.size) }} · {{ formatTime(file.modifiedAt) }}</span>
+            <span>{{ formatBytes(file.size) }} / {{ formatTime(file.modifiedAt) }}</span>
           </div>
         </div>
       </section>
     </section>
+
+    <el-dialog v-model="previewVisible" class="preview-dialog" :title="previewFile?.name || '文件预览'" width="min(92vw, 960px)" destroy-on-close>
+      <div v-if="previewFile" class="preview-body" v-loading="previewLoading">
+        <img v-if="previewKind === 'image'" class="preview-image" :src="fileUrl(previewFile.path)" :alt="previewFile.name">
+        <video v-else-if="previewKind === 'video'" class="preview-media" :src="fileUrl(previewFile.path)" controls />
+        <audio v-else-if="previewKind === 'audio'" class="preview-audio" :src="fileUrl(previewFile.path)" controls />
+        <iframe v-else-if="previewKind === 'pdf'" class="preview-frame" :src="fileUrl(previewFile.path)" />
+        <pre v-else-if="previewKind === 'text'" class="preview-text">{{ previewText }}</pre>
+        <el-empty v-else description="暂不支持预览此文件类型" />
+      </div>
+      <template #footer>
+        <el-button v-if="previewFile" :icon="Download" @click="downloadPreview">
+          下载
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

@@ -1,21 +1,21 @@
 $--colors: (
   'primary': (
-    'base': green,
+    'base': #007aff,
   ),
   'success': (
-    'base': #21ba45,
+    'base': #34c759,
   ),
   'warning': (
-    'base': #f2711c,
+    'base': #ff9500,
   ),
   'danger': (
-    'base': #db2828,
+    'base': #ff3b30,
   ),
   'error': (
-    'base': #db2828,
+    'base': #ff3b30,
   ),
   'info': (
-    'base': #42b8dd,
+    'base': #5ac8fa,
   ),
 );
 
@@ -29,7 +29,17 @@ $--colors: (
 @forward 'element-plus/theme-chalk/src/common/var.scss' with (
   // do not use same name, it will override.
   $colors: $--colors,
-  $button-padding-horizontal: ('default': 50px)
+  $border-radius: (
+    'base': 10px,
+    'small': 8px,
+    'round': 999px,
+    'circle': 100%,
+  ),
+  $button-padding-horizontal: (
+    'default': 14px,
+    'small': 12px,
+    'large': 18px,
+  )
 );
 
 // if you want to import all

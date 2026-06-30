@@ -11,6 +11,7 @@ const form = reactive({
   privatePathList: '',
   refererProtection: 'disabled',
   refererAllowList: '',
+  downloadLimitPerMinute: '0',
 })
 
 async function loadSettings() {
@@ -22,6 +23,7 @@ async function loadSettings() {
     form.privatePathList = settings.privatePathList || ''
     form.refererProtection = settings.refererProtection || 'disabled'
     form.refererAllowList = settings.refererAllowList || ''
+    form.downloadLimitPerMinute = settings.downloadLimitPerMinute || '0'
   }
   finally {
     loading.value = false
@@ -39,6 +41,7 @@ async function saveRules() {
         privatePathList: form.privatePathList,
         refererProtection: form.refererProtection,
         refererAllowList: form.refererAllowList,
+        downloadLimitPerMinute: form.downloadLimitPerMinute,
       }),
     })
     ElMessage.success('访问控制规则已保存')
@@ -60,7 +63,7 @@ onMounted(loadSettings)
             访问控制
           </div>
           <p class="lede">
-            配置后台接口、公开分享和直链访问的 IP、路径和来源策略。
+            配置后台接口、公开分享和直链访问的 IP、路径、来源与下载策略。
           </p>
         </div>
       </div>
@@ -108,6 +111,13 @@ onMounted(loadSettings)
           </el-form-item>
         </div>
 
+        <el-form-item label="下载限频">
+          <el-input
+            v-model="form.downloadLimitPerMinute"
+            placeholder="每个 IP 每分钟允许的下载次数，0 表示关闭"
+          />
+        </el-form-item>
+
         <el-form-item>
           <el-button type="primary" :loading="saving" @click="saveRules">
             保存规则
@@ -127,6 +137,9 @@ onMounted(loadSettings)
         </el-tag>
         <el-tag type="info">
           Referer 防盗链
+        </el-tag>
+        <el-tag type="info">
+          下载限频
         </el-tag>
       </div>
     </section>

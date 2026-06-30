@@ -25,6 +25,7 @@ declare module 'vue-router/auto-routes' {
     '/logs': RouteRecordInfo<'/logs', '/logs', Record<never, never>, Record<never, never>>,
     '/rules': RouteRecordInfo<'/rules', '/rules', Record<never, never>, Record<never, never>>,
     '/s/[token]': RouteRecordInfo<'/s/[token]', '/s/:token', { token: ParamValue<true> }, { token: ParamValue<false> }>,
+    '/search': RouteRecordInfo<'/search', '/search', Record<never, never>, Record<never, never>>,
     '/settings': RouteRecordInfo<'/settings', '/settings', Record<never, never>, Record<never, never>>,
     '/shares': RouteRecordInfo<'/shares', '/shares', Record<never, never>, Record<never, never>>,
     '/uploads': RouteRecordInfo<'/uploads', '/uploads', Record<never, never>, Record<never, never>>,

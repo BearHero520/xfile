@@ -21,8 +21,8 @@ const isPlain = computed(() => route.path === '/login' || route.path.startsWith(
 <style>
 #app {
   min-height: 100vh;
-  color: var(--ep-text-color-primary);
-  background: #f5f7f4;
+  color: var(--x-color-text);
+  background: transparent;
 }
 
 .main-container {

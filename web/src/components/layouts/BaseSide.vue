@@ -6,6 +6,7 @@ import {
   Link,
   Lock,
   Operation,
+  Search,
   Setting,
   Share,
   Upload,
@@ -25,6 +26,12 @@ import {
         <el-icon><Share /></el-icon>
         <template #title>
           分享列表
+        </template>
+      </el-menu-item>
+      <el-menu-item index="/search">
+        <el-icon><Search /></el-icon>
+        <template #title>
+          全局搜索
         </template>
       </el-menu-item>
       <el-menu-item index="/direct-links">

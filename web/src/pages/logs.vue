@@ -2,17 +2,20 @@
 import type { AccessLog, AccessLogPage } from '~/api'
 import { Delete, Refresh, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { api, formatTime } from '~/api'
 
 const logs = ref<AccessLog[]>([])
 const total = ref(0)
 const loading = ref(false)
 const cleanupLoading = ref(false)
+const cleanupDays = ref(30)
 const filters = reactive({
   action: '',
   path: '',
   ip: '',
+  userAgent: '',
+  timeRange: [] as [Date, Date] | [],
   page: 1,
   pageSize: 20,
 })
@@ -30,8 +33,27 @@ const actionOptions = [
   { label: '分享下载', value: 'share-download' },
   { label: '直链访问', value: 'direct' },
   { label: 'IP 拦截', value: 'ip-blocked' },
+  { label: '下载限频', value: 'download-rate-limited' },
   { label: '日志清理', value: 'logs-cleanup' },
 ]
+
+const activeFilterCount = computed(() => [
+  filters.action,
+  filters.path,
+  filters.ip,
+  filters.userAgent,
+  filters.timeRange.length ? 'timeRange' : '',
+].filter(Boolean).length)
+
+function toLogTime(value: Date, endOfDay = false) {
+  const date = new Date(value)
+  if (endOfDay)
+    date.setHours(23, 59, 59, 999)
+  else
+    date.setHours(0, 0, 0, 0)
+  const pad = (num: number) => String(num).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
 
 function logQuery() {
   const params = new URLSearchParams({
@@ -44,6 +66,12 @@ function logQuery() {
     params.set('path', filters.path.trim())
   if (filters.ip.trim())
     params.set('ip', filters.ip.trim())
+  if (filters.userAgent.trim())
+    params.set('userAgent', filters.userAgent.trim())
+  if (filters.timeRange.length === 2) {
+    params.set('startTime', toLogTime(filters.timeRange[0]))
+    params.set('endTime', toLogTime(filters.timeRange[1], true))
+  }
   return params.toString()
 }
 
@@ -70,6 +98,8 @@ function resetFilters() {
   filters.action = ''
   filters.path = ''
   filters.ip = ''
+  filters.userAgent = ''
+  filters.timeRange = []
   filters.page = 1
   void loadLogs()
 }
@@ -88,13 +118,13 @@ function changePageSize(pageSize: number) {
 async function cleanupLogs(mode: 'old' | 'all') {
   const all = mode === 'all'
   await ElMessageBox.confirm(
-    all ? '确认清空全部访问日志？此操作不可恢复。' : '确认删除 30 天前的访问日志？',
+    all ? '确认清空全部访问日志？此操作不可恢复。' : `确认删除 ${cleanupDays.value} 天前的访问日志？`,
     all ? '清空日志' : '清理旧日志',
     { type: 'warning' },
   )
   cleanupLoading.value = true
   try {
-    const data = await api<{ deleted: number }>(all ? '/api/logs?all=true' : '/api/logs?olderThanDays=30', {
+    const data = await api<{ deleted: number }>(all ? '/api/logs?all=true' : `/api/logs?olderThanDays=${cleanupDays.value}`, {
       method: 'DELETE',
     })
     ElMessage.success(`已删除 ${data.deleted} 条日志`)
@@ -104,6 +134,20 @@ async function cleanupLogs(mode: 'old' | 'all') {
   finally {
     cleanupLoading.value = false
   }
+}
+
+function actionLabel(action: string) {
+  return actionOptions.find(item => item.value === action)?.label || action
+}
+
+function actionTagType(action: string) {
+  if (['delete', 'ip-blocked', 'download-rate-limited'].includes(action))
+    return 'danger'
+  if (['upload', 'mkdir', 'move'].includes(action))
+    return 'success'
+  if (['share-view', 'share-download', 'direct'].includes(action))
+    return 'warning'
+  return 'info'
 }
 
 onMounted(loadLogs)
@@ -122,8 +166,14 @@ onMounted(loadLogs)
           </p>
         </div>
         <div class="panel-actions">
+          <el-select v-model="cleanupDays" class="cleanup-select" :disabled="cleanupLoading">
+            <el-option label="7 天前" :value="7" />
+            <el-option label="30 天前" :value="30" />
+            <el-option label="90 天前" :value="90" />
+            <el-option label="180 天前" :value="180" />
+          </el-select>
           <el-button :icon="Delete" :loading="cleanupLoading" @click="cleanupLogs('old')">
-            清理 30 天前
+            清理旧日志
           </el-button>
           <el-button type="danger" :icon="Delete" :loading="cleanupLoading" @click="cleanupLogs('all')">
             清空全部
@@ -148,9 +198,22 @@ onMounted(loadLogs)
         <el-form-item label="IP">
           <el-input v-model="filters.ip" clearable placeholder="输入 IP 关键词" @keyup.enter="searchLogs" />
         </el-form-item>
+        <el-form-item label="客户端">
+          <el-input v-model="filters.userAgent" clearable placeholder="浏览器 / 客户端关键词" @keyup.enter="searchLogs" />
+        </el-form-item>
+        <el-form-item label="时间">
+          <el-date-picker
+            v-model="filters.timeRange"
+            type="daterange"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            unlink-panels
+          />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" :icon="Search" @click="searchLogs">
-            查询
+            查询<span v-if="activeFilterCount">({{ activeFilterCount }})</span>
           </el-button>
           <el-button :icon="Refresh" @click="resetFilters">
             重置
@@ -159,7 +222,13 @@ onMounted(loadLogs)
       </el-form>
 
       <el-table :data="logs" empty-text="暂无访问日志">
-        <el-table-column prop="action" label="动作" width="130" />
+        <el-table-column label="动作" width="130">
+          <template #default="{ row }">
+            <el-tag size="small" :type="actionTagType(row.action)" effect="light">
+              {{ actionLabel(row.action) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="path" label="路径" min-width="260" show-overflow-tooltip />
         <el-table-column prop="ip" label="IP" width="160" />
         <el-table-column prop="userAgent" label="客户端" min-width="220" show-overflow-tooltip />

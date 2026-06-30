@@ -64,6 +64,47 @@ func TestMoveFile(t *testing.T) {
 	}
 }
 
+func TestSearchFiles(t *testing.T) {
+	s := newTestStore(t)
+	docs, err := s.FilePath("docs/manuals")
+	if err != nil {
+		t.Fatalf("docs path: %v", err)
+	}
+	if err := os.MkdirAll(docs, 0o755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, "setup-guide.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write guide: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, "notes.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write notes: %v", err)
+	}
+
+	results, err := s.SearchFiles("guide", 20)
+	if err != nil {
+		t.Fatalf("search files: %v", err)
+	}
+	if len(results) != 1 || results[0].Path != "docs/manuals/setup-guide.txt" {
+		t.Fatalf("unexpected search results: %#v", results)
+	}
+
+	folders, err := s.SearchFiles("manuals", 20)
+	if err != nil {
+		t.Fatalf("search folders: %v", err)
+	}
+	if len(folders) < 1 || folders[0].Path != "docs/manuals" {
+		t.Fatalf("expected matching folder first, got %#v", folders)
+	}
+
+	empty, err := s.SearchFiles("guide", 0)
+	if err != nil {
+		t.Fatalf("search with fallback limit: %v", err)
+	}
+	if len(empty) != 1 {
+		t.Fatalf("fallback limit search = %#v", empty)
+	}
+}
+
 func TestSharePassword(t *testing.T) {
 	s := newTestStore(t)
 	path, err := s.FilePath("report.txt")

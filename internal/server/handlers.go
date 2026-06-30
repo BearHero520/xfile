@@ -34,6 +34,20 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, files)
 }
 
+func (s *Server) searchFiles(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	limit := queryInt(r, "limit", 50)
+	files, err := s.store.SearchFiles(query, limit)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(query) != "" {
+		_ = s.store.LogAccess("search", query, clientIP(r), r.UserAgent())
+	}
+	writeJSON(w, http.StatusOK, files)
+}
+
 func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 	if s.store.SettingValue("allowUpload", "enabled") != "enabled" {
 		writeError(w, http.StatusForbidden, os.ErrPermission)
@@ -341,6 +355,15 @@ func writeError(w http.ResponseWriter, status int, err error) {
 }
 
 func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if first, _, ok := strings.Cut(forwarded, ","); ok {
+			return strings.TrimSpace(first)
+		}
+		return forwarded
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

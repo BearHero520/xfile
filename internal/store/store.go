@@ -42,6 +42,8 @@ func (s *Store) Settings() (map[string]string, error) {
 		"publicIndex": "disabled",
 		"allowUpload": "enabled",
 		"maxUploadMB": "512",
+		"ipAllowList": "",
+		"ipDenyList":  "",
 	}
 	for rows.Next() {
 		var key, value string
@@ -160,6 +162,67 @@ func (s *Store) ListFiles(rel string) ([]domain.FileEntry, error) {
 		})
 	}
 	return files, nil
+}
+
+func (s *Store) SearchFiles(query string, limit int) ([]domain.FileEntry, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []domain.FileEntry{}, nil
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	root, err := filepath.Abs(s.cfg.FilesDir)
+	if err != nil {
+		return nil, err
+	}
+	needle := strings.ToLower(query)
+	results := make([]domain.FileEntry, 0)
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.Contains(strings.ToLower(d.Name()), needle) && !strings.Contains(strings.ToLower(rel), needle) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		entryType := "file"
+		size := info.Size()
+		if d.IsDir() {
+			entryType = "folder"
+			size = 0
+		}
+		results = append(results, domain.FileEntry{
+			Name:       d.Name(),
+			Path:       rel,
+			Type:       entryType,
+			Size:       size,
+			ModifiedAt: info.ModTime().Format(time.RFC3339),
+		})
+		if len(results) >= limit {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (s *Store) FilePath(rel string) (string, error) {

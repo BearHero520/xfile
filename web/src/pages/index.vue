@@ -37,15 +37,33 @@ const shares = ref<ShareEntry[]>([])
 const logs = ref<AccessLog[]>([])
 const settings = ref<Record<string, string>>({})
 const loading = ref(false)
+const searching = ref(false)
 const activePath = ref('')
 const keyword = ref('')
+const searchMode = ref<'current' | 'global'>('current')
+const globalResults = ref<FileEntry[]>([])
 const uploader = ref<HTMLInputElement>()
 
-const filteredFiles = computed(() => {
+const searchModeOptions = [
+  { label: '当前目录', value: 'current' },
+  { label: '全局', value: 'global' },
+]
+
+const displayedFiles = computed(() => {
   const term = keyword.value.trim().toLowerCase()
+  if (searchMode.value === 'global')
+    return term ? globalResults.value : files.value
   if (!term)
     return files.value
   return files.value.filter(file => `${file.name} ${file.path}`.toLowerCase().includes(term))
+})
+
+const filteredFiles = displayedFiles
+
+const fileEmptyText = computed(() => {
+  if (searchMode.value === 'global' && keyword.value.trim())
+    return '未找到匹配文件'
+  return '当前目录暂无文件'
 })
 
 const breadcrumbs = computed(() => {
@@ -79,9 +97,38 @@ async function loadAll() {
   }
 }
 
+async function runSearch() {
+  if (searchMode.value !== 'global') {
+    globalResults.value = []
+    return
+  }
+  const term = keyword.value.trim()
+  if (!term) {
+    globalResults.value = []
+    return
+  }
+  searching.value = true
+  try {
+    globalResults.value = await api<FileEntry[]>(`/api/files/search?q=${encodeURIComponent(term)}&limit=100`)
+  }
+  catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '搜索失败')
+  }
+  finally {
+    searching.value = false
+  }
+}
+
+function changeSearchMode() {
+  void runSearch()
+}
+
 function openFile(file: FileEntry) {
   if (file.type === 'folder') {
     activePath.value = file.path
+    searchMode.value = 'current'
+    keyword.value = ''
+    globalResults.value = []
     loadAll()
     return
   }
@@ -221,7 +268,24 @@ onMounted(loadAll)
               </button>
             </el-breadcrumb-item>
           </el-breadcrumb>
-          <el-input v-model="keyword" class="search-input" placeholder="搜索当前目录" :prefix-icon="Search" clearable />
+          <div class="file-search-tools">
+            <el-segmented
+              v-model="searchMode"
+              :options="searchModeOptions"
+              size="small"
+              @change="changeSearchMode"
+            />
+            <el-input
+              v-model="keyword"
+              class="search-input"
+              :placeholder="searchMode === 'global' ? '搜索全部文件' : '搜索当前目录'"
+              :prefix-icon="Search"
+              :loading="searching"
+              clearable
+              @input="runSearch"
+              @clear="runSearch"
+            />
+          </div>
         </div>
 
         <el-table :data="filteredFiles" class="file-table" empty-text="当前目录暂无文件">

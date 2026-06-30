@@ -110,6 +110,12 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) private(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.ipAllowed(r) {
+			ip := clientIP(r)
+			_ = s.store.LogAccess("ip-blocked", r.URL.Path, ip, r.UserAgent())
+			writeError(w, http.StatusForbidden, errors.New("ip address is not allowed"))
+			return
+		}
 		if !s.isAuthenticated(r) {
 			writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
 			return

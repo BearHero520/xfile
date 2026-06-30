@@ -243,6 +243,16 @@ h1 {
   width: 260px;
 }
 
+.file-search-tools {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.pane-toolbar > .search-input {
+  display: none;
+}
+
 .file-table {
   border-radius: 0 0 8px 8px;
 }
@@ -263,6 +273,14 @@ h1 {
 
 .settings-panel {
   max-width: 760px;
+}
+
+.access-panel {
+  max-width: 880px;
+}
+
+.access-rules-form {
+  margin-top: 18px;
 }
 
 .panel-heading {
@@ -446,6 +464,12 @@ h1 {
   }
 
   .search-input {
+    width: 100%;
+  }
+
+  .file-search-tools {
+    align-items: stretch;
+    flex-direction: column;
     width: 100%;
   }
 

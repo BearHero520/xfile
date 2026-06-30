@@ -3,15 +3,15 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
 const route = useRoute()
-const isLogin = computed(() => route.path === '/login')
+const isPlain = computed(() => route.path === '/login' || route.path.startsWith('/s/'))
 </script>
 
 <template>
   <el-config-provider namespace="ep">
-    <BaseHeader v-if="!isLogin" />
-    <div :class="isLogin ? 'login-container' : 'main-container'">
-      <BaseSide v-if="!isLogin" />
-      <div :class="isLogin ? 'login-shell' : 'page-shell'">
+    <BaseHeader v-if="!isPlain" />
+    <div :class="isPlain ? 'login-container' : 'main-container'">
+      <BaseSide v-if="!isPlain" />
+      <div :class="isPlain ? 'login-shell' : 'page-shell'">
         <RouterView />
       </div>
     </div>
@@ -36,10 +36,7 @@ const isLogin = computed(() => route.path === '/login')
   padding: 24px;
 }
 
-.login-container {
-  min-height: 100vh;
-}
-
+.login-container,
 .login-shell {
   min-height: 100vh;
 }

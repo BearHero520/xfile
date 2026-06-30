@@ -16,6 +16,19 @@ export interface ShareEntry {
   createdAt: string
 }
 
+export interface ShareDetail {
+  token: string
+  path: string
+  currentPath?: string
+  name: string
+  type: 'file' | 'folder'
+  size: number
+  protected: boolean
+  expiresAt?: string
+  createdAt: string
+  files?: FileEntry[]
+}
+
 export interface DirectLinkEntry {
   id: number
   token: string
@@ -32,6 +45,13 @@ export interface AccessLog {
   ip: string
   userAgent: string
   createdAt: string
+}
+
+export interface AccessLogPage {
+  items: AccessLog[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 export interface Dashboard {
@@ -52,7 +72,7 @@ export async function api<T>(url: string, options: RequestInit = {}): Promise<T>
     headers.set('Content-Type', 'application/json')
 
   const res = await fetch(url, { ...options, headers, credentials: 'same-origin' })
-  if (res.status === 401 && !location.pathname.startsWith('/login')) {
+  if (res.status === 401 && !location.pathname.startsWith('/login') && !location.pathname.startsWith('/s/')) {
     location.href = `/login?redirect=${encodeURIComponent(location.pathname)}`
     throw new Error('请先登录')
   }
@@ -65,6 +85,16 @@ export async function api<T>(url: string, options: RequestInit = {}): Promise<T>
 
 export function fileUrl(path: string) {
   return `/api/files/download?path=${encodeURIComponent(path)}`
+}
+
+export function shareDownloadUrl(token: string, password: string, path = '') {
+  const params = new URLSearchParams()
+  if (password)
+    params.set('password', password)
+  if (path)
+    params.set('path', path)
+  const query = params.toString()
+  return `/api/public/shares/${encodeURIComponent(token)}/download${query ? `?${query}` : ''}`
 }
 
 export function formatBytes(bytes: number) {

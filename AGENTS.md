@@ -27,20 +27,21 @@ Docker, Compose, and GitHub Actions files live at the repository root. The backe
 - `docker build -t xfile:local .`: builds the combined production image.
 - `docker compose up --build`: runs the combined service locally.
 
-Set `XFILE_ADMIN_PASSWORD` before starting any deployable instance.
+On first use, visit `/login` and initialize the system super administrator account and password.
 
 ## Current Implemented Features
 
+- First-use super administrator initialization stored in SQLite.
 - Admin login/logout with signed HTTP-only session cookie.
 - Protected management API requiring login.
 - SQLite persistence using `github.com/glebarez/sqlite` with pure-Go builds.
 - Local file browsing, upload, download, delete, create folder, rename, and move.
 - Upload enable/disable and max upload size settings.
-- Share links with optional password, expiration field, and hashed password storage.
+- Share links with optional password, expiration field, hashed password storage, and a dedicated `/s/{token}` landing page.
 - Direct links with enable/disable support.
 - Access logging for file operations, shares, and direct links.
 - Dashboard summary for file count, folder count, storage usage, shares, recent files, and logs.
-- Vue admin pages for login, file management, shares, direct links, logs, settings, rules, uploads, access, and WebDAV placeholder.
+- Vue pages for first-use setup/login, file management, public share landing, shares, direct links, logs, settings, rules, uploads, access, and WebDAV placeholder.
 - Dockerfile builds `web/dist` and embeds it in the Go runtime image.
 - GitHub Actions runs Go tests, frontend typecheck/build, then Docker image build/publish.
 
@@ -51,8 +52,7 @@ Set `XFILE_ADMIN_PASSWORD` before starting any deployable instance.
 - Online previews for images, video, audio, PDF, text, and office documents.
 - Text editing and richer file metadata/descriptions.
 - Batch operations: batch delete, move, share, and archive download.
-- Dedicated share landing page instead of direct file serving only.
-- Folder share browsing.
+- Nested folder share browsing.
 - Global backend search and server-side sorting/filtering.
 - Large-file chunked upload, folder upload, upload queue, progress, and resumable uploads.
 - Access-control rules: IP allow/deny lists, private directory rules, Referer protection, and download rate limiting.
@@ -61,7 +61,7 @@ Set `XFILE_ADMIN_PASSWORD` before starting any deployable instance.
 - Security hardening: login rate limiting, CSRF protection, share password attempt limiting, and stronger reverse-proxy deployment docs.
 - More tests: HTTP handler tests, auth tests, migration tests, and frontend interaction tests.
 
-Recommended next priorities: dedicated share page, folder shares, global search, and log pagination/filtering.
+Recommended next priorities: nested folder share browsing, global search, log pagination/filtering, and richer access-control rules.
 
 ## Coding Style & Naming Conventions
 
@@ -87,4 +87,4 @@ Use concise, imperative commit subjects such as `Add admin auth` or `Implement s
 
 ## Security & Configuration Tips
 
-Never expose or commit admin passwords, session secrets, database files, uploaded files, or runtime `data/` contents. Set `XFILE_ADMIN_PASSWORD` before deployment. Set `XFILE_SESSION_SECRET` for stable sessions across restarts. Keep `web/dist`, `web/node_modules`, local logs, and generated binaries untracked.
+Never expose or commit admin passwords, session secrets, database files, uploaded files, or runtime `data/` contents. Initialize the super administrator through `/login` on first use. Set `XFILE_SESSION_SECRET` for stable sessions across restarts. Keep `web/dist`, `web/node_modules`, local logs, and generated binaries untracked.

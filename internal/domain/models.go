@@ -18,6 +18,26 @@ type Share struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+type ShareDetail struct {
+	Token       string      `json:"token"`
+	Path        string      `json:"path"`
+	CurrentPath string      `json:"currentPath,omitempty"`
+	Name        string      `json:"name"`
+	Type        string      `json:"type"`
+	Size        int64       `json:"size"`
+	Protected   bool        `json:"protected"`
+	ExpiresAt   string      `json:"expiresAt,omitempty"`
+	CreatedAt   string      `json:"createdAt"`
+	Files       []FileEntry `json:"files,omitempty"`
+}
+
+type User struct {
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	Role      string `json:"role"`
+	CreatedAt string `json:"createdAt"`
+}
+
 type DirectLink struct {
 	ID        int64  `json:"id"`
 	Token     string `json:"token"`
@@ -34,6 +54,13 @@ type AccessLog struct {
 	IP        string `json:"ip"`
 	UserAgent string `json:"userAgent"`
 	CreatedAt string `json:"createdAt"`
+}
+
+type AccessLogPage struct {
+	Items    []AccessLog `json:"items"`
+	Total    int         `json:"total"`
+	Page     int         `json:"page"`
+	PageSize int         `json:"pageSize"`
 }
 
 type Dashboard struct {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"xfile/internal/config"
 	"xfile/internal/domain"
 )
@@ -61,6 +62,56 @@ func (s *Store) SettingValue(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func (s *Store) IsInitialized() (bool, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *Store) CreateSuperAdmin(username, password string) (domain.User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return domain.User{}, errors.New("username is required")
+	}
+	if len(password) < 8 {
+		return domain.User{}, errors.New("password must be at least 8 characters")
+	}
+	initialized, err := s.IsInitialized()
+	if err != nil {
+		return domain.User{}, err
+	}
+	if initialized {
+		return domain.User{}, errors.New("system is already initialized")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return domain.User{}, err
+	}
+	res, err := s.db.Exec(`INSERT INTO users(username, password_hash, role) VALUES(?, ?, 'super_admin')`, username, string(hash))
+	if err != nil {
+		return domain.User{}, err
+	}
+	id, _ := res.LastInsertId()
+	return domain.User{ID: id, Username: username, Role: "super_admin", CreatedAt: time.Now().Format(time.RFC3339)}, nil
+}
+
+func (s *Store) AuthenticateUser(username, password string) (domain.User, error) {
+	username = strings.TrimSpace(username)
+	var user domain.User
+	var passwordHash string
+	err := s.db.QueryRow(`SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?`, username).
+		Scan(&user.ID, &user.Username, &passwordHash, &user.Role, &user.CreatedAt)
+	if err != nil {
+		return domain.User{}, errors.New("invalid username or password")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
+		return domain.User{}, errors.New("invalid username or password")
+	}
+	return user, nil
 }
 
 func (s *Store) SaveSettings(settings map[string]string) error {
@@ -317,6 +368,91 @@ func (s *Store) ResolveShare(token string, password string) (domain.Share, error
 	return share, nil
 }
 
+func (s *Store) ShareDetail(token string, password string, child string) (domain.ShareDetail, error) {
+	share, err := s.ResolveShare(token, password)
+	if err != nil {
+		return domain.ShareDetail{}, err
+	}
+	base, err := s.safePath(share.Path)
+	if err != nil {
+		return domain.ShareDetail{}, err
+	}
+	baseInfo, err := os.Stat(base)
+	if err != nil {
+		return domain.ShareDetail{}, err
+	}
+	if !baseInfo.IsDir() && strings.TrimSpace(child) != "" {
+		return domain.ShareDetail{}, errors.New("shared file does not contain child paths")
+	}
+
+	cleanChild, err := cleanRelative(child)
+	if err != nil {
+		return domain.ShareDetail{}, err
+	}
+	currentRel := cleanJoin(share.Path, cleanChild)
+	path, err := s.safePath(currentRel)
+	if err != nil {
+		return domain.ShareDetail{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return domain.ShareDetail{}, err
+	}
+	entryType := "file"
+	size := info.Size()
+	files := make([]domain.FileEntry, 0)
+	if info.IsDir() {
+		entryType = "folder"
+		size = 0
+		files, err = s.ListFiles(currentRel)
+		if err != nil {
+			return domain.ShareDetail{}, err
+		}
+	}
+	return domain.ShareDetail{
+		Token:       share.Token,
+		Path:        share.Path,
+		CurrentPath: currentRel,
+		Name:        info.Name(),
+		Type:        entryType,
+		Size:        size,
+		Protected:   share.Protected,
+		ExpiresAt:   share.ExpiresAt,
+		CreatedAt:   share.CreatedAt,
+		Files:       files,
+	}, nil
+}
+
+func (s *Store) SharedFilePath(token, password, child string) (domain.Share, string, error) {
+	share, err := s.ResolveShare(token, password)
+	if err != nil {
+		return domain.Share{}, "", err
+	}
+	base, err := s.safePath(share.Path)
+	if err != nil {
+		return domain.Share{}, "", err
+	}
+	info, err := os.Stat(base)
+	if err != nil {
+		return domain.Share{}, "", err
+	}
+	if !info.IsDir() {
+		if strings.TrimSpace(child) != "" {
+			return domain.Share{}, "", errors.New("shared file does not contain child paths")
+		}
+		return share, base, nil
+	}
+	cleanChild, err := cleanRelative(child)
+	if err != nil {
+		return domain.Share{}, "", err
+	}
+	target, err := s.safePath(cleanJoin(share.Path, cleanChild))
+	if err != nil {
+		return domain.Share{}, "", err
+	}
+	return share, target, nil
+}
+
 func (s *Store) ShareCount() (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM shares`).Scan(&count)
@@ -408,6 +544,66 @@ func (s *Store) AccessLogs(limit int) ([]domain.AccessLog, error) {
 	return logs, rows.Err()
 }
 
+func (s *Store) SearchAccessLogs(page, pageSize int, action, path, ip string) (domain.AccessLogPage, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	where, args := accessLogFilters(action, path, ip)
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM access_logs`+where, args...).Scan(&total); err != nil {
+		return domain.AccessLogPage{}, err
+	}
+
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+	rows, err := s.db.Query(`SELECT id, action, path, ip, user_agent, created_at FROM access_logs`+where+` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		return domain.AccessLogPage{}, err
+	}
+	defer rows.Close()
+
+	logs := make([]domain.AccessLog, 0)
+	for rows.Next() {
+		var log domain.AccessLog
+		if err := rows.Scan(&log.ID, &log.Action, &log.Path, &log.IP, &log.UserAgent, &log.CreatedAt); err != nil {
+			return domain.AccessLogPage{}, err
+		}
+		logs = append(logs, log)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.AccessLogPage{}, err
+	}
+	return domain.AccessLogPage{Items: logs, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func accessLogFilters(action, path, ip string) (string, []any) {
+	conditions := make([]string, 0, 3)
+	args := make([]any, 0, 3)
+	if action = strings.TrimSpace(action); action != "" {
+		conditions = append(conditions, "action = ?")
+		args = append(args, action)
+	}
+	if path = strings.TrimSpace(path); path != "" {
+		conditions = append(conditions, "path LIKE ?")
+		args = append(args, "%"+path+"%")
+	}
+	if ip = strings.TrimSpace(ip); ip != "" {
+		conditions = append(conditions, "ip LIKE ?")
+		args = append(args, "%"+ip+"%")
+	}
+	if len(conditions) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
 func (s *Store) safePath(rel string) (string, error) {
 	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
 	clean := filepath.Clean(filepath.FromSlash(rel))
@@ -437,6 +633,18 @@ func cleanJoin(parts ...string) string {
 		return ""
 	}
 	return strings.TrimPrefix(joined, "/")
+}
+
+func cleanRelative(rel string) (string, error) {
+	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	if clean == "." {
+		return "", nil
+	}
+	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+		return "", errors.New("invalid path")
+	}
+	return filepath.ToSlash(clean), nil
 }
 
 func nullable(value string) any {

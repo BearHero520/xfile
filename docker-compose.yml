@@ -6,7 +6,6 @@ services:
       - "3008:3008"
     environment:
       XFILE_SITE_NAME: XFile
-      XFILE_ADMIN_PASSWORD: ${XFILE_ADMIN_PASSWORD:?set XFILE_ADMIN_PASSWORD before starting}
       XFILE_SESSION_SECRET: ${XFILE_SESSION_SECRET:-}
     volumes:
       - ./data:/app/data

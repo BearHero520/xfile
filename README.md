@@ -35,7 +35,6 @@ Zdir Pro core features:
 Start the backend:
 
 ```bash
-export XFILE_ADMIN_PASSWORD='replace-with-a-strong-password'
 go run .
 ```
 
@@ -60,7 +59,7 @@ The Go service reads frontend assets from `web/dist` by default. Override it wit
 
 ## Configuration
 
-- `XFILE_ADMIN_PASSWORD`: required for admin login.
+- First visit `/login` to initialize the system super administrator account and password.
 - `XFILE_SESSION_SECRET`: optional signing key for login cookies. If omitted, a process-local secret is generated on startup.
 - `XFILE_DATA_DIR`: runtime data directory, default `data`.
 - `XFILE_FILES_DIR`: uploaded file directory, default `data/files`.
@@ -71,13 +70,12 @@ The Go service reads frontend assets from `web/dist` by default. Override it wit
 
 ```bash
 docker build -t xfile:local .
-docker run --rm -p 3008:3008 -e XFILE_ADMIN_PASSWORD="$XFILE_ADMIN_PASSWORD" -v ./data:/app/data xfile:local
+docker run --rm -p 3008:3008 -v ./data:/app/data xfile:local
 ```
 
 Or:
 
 ```bash
-export XFILE_ADMIN_PASSWORD='replace-with-a-strong-password'
 docker compose up --build
 ```
 

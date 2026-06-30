@@ -12,7 +12,6 @@ type Config struct {
 	DatabasePath  string
 	StaticDir     string
 	SiteName      string
-	AdminPassword string
 	SessionSecret string
 }
 
@@ -27,7 +26,6 @@ func Load() Config {
 		DatabasePath:  env("XFILE_DB", filepath.Join(dataDir, "xfile.db")),
 		StaticDir:     env("XFILE_STATIC_DIR", filepath.Join("web", "dist")),
 		SiteName:      env("XFILE_SITE_NAME", "XFile"),
-		AdminPassword: os.Getenv("XFILE_ADMIN_PASSWORD"),
 		SessionSecret: os.Getenv("XFILE_SESSION_SECRET"),
 	}
 }

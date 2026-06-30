@@ -179,6 +179,30 @@ func (s *Server) deleteShare(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) sharePage(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, filepath.Join(s.cfg.StaticDir, "index.html"))
+}
+
+func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
+	detail, err := s.store.ShareDetail(r.PathValue("token"), r.URL.Query().Get("password"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	_ = s.store.LogAccess("share-view", detail.CurrentPath, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusOK, detail)
+}
+
+func (s *Server) downloadShare(w http.ResponseWriter, r *http.Request) {
+	share, path, err := s.store.SharedFilePath(r.PathValue("token"), r.URL.Query().Get("password"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	_ = s.store.LogAccess("share-download", share.Path, clientIP(r), r.UserAgent())
+	http.ServeFile(w, r, path)
+}
+
 func (s *Server) openShare(w http.ResponseWriter, r *http.Request) {
 	share, err := s.store.ResolveShare(r.PathValue("token"), r.URL.Query().Get("password"))
 	if err != nil {
@@ -268,7 +292,15 @@ func (s *Server) openDirectLink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) accessLogs(w http.ResponseWriter, r *http.Request) {
-	logs, err := s.store.AccessLogs(50)
+	page := queryInt(r, "page", 1)
+	pageSize := queryInt(r, "pageSize", 20)
+	logs, err := s.store.SearchAccessLogs(
+		page,
+		pageSize,
+		r.URL.Query().Get("action"),
+		r.URL.Query().Get("path"),
+		r.URL.Query().Get("ip"),
+	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -314,4 +346,12 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func queryInt(r *http.Request, key string, fallback int) int {
+	value, err := strconv.Atoi(r.URL.Query().Get(key))
+	if err != nil {
+		return fallback
+	}
+	return value
 }

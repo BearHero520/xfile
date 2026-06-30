@@ -18,33 +18,66 @@ import (
 const sessionCookieName = "xfile_session"
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if strings.TrimSpace(s.cfg.AdminPassword) == "" {
-		writeError(w, http.StatusServiceUnavailable, errors.New("admin password is not configured"))
+	initialized, err := s.store.IsInitialized()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !initialized {
+		writeError(w, http.StatusConflict, errors.New("system is not initialized"))
 		return
 	}
 
 	var req struct {
+		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(s.cfg.AdminPassword)) != 1 {
-		writeError(w, http.StatusUnauthorized, errors.New("invalid password"))
+	user, err := s.store.AuthenticateUser(req.Username, req.Password)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
 		return
 	}
 
 	expires := time.Now().Add(24 * time.Hour)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
-		Value:    s.signSession(expires),
+		Value:    s.signSession(user.Username, expires),
 		Path:     "/",
 		Expires:  expires,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "user": user})
+}
+
+func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	user, err := s.store.CreateSuperAdmin(req.Username, req.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	expires := time.Now().Add(24 * time.Hour)
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    s.signSession(user.Username, expires),
+		Path:     "/",
+		Expires:  expires,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"authenticated": true, "user": user})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -61,9 +94,16 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	initialized, err := s.store.IsInitialized()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	username, authenticated := s.sessionUsername(r)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"configured":     strings.TrimSpace(s.cfg.AdminPassword) != "",
-		"authenticated":  s.isAuthenticated(r),
+		"initialized":    initialized,
+		"authenticated":  authenticated,
+		"username":       username,
 		"sessionSeconds": int((24 * time.Hour).Seconds()),
 	})
 }
@@ -79,34 +119,48 @@ func (s *Server) private(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) isAuthenticated(r *http.Request) bool {
+	_, ok := s.sessionUsername(r)
+	return ok
+}
+
+func (s *Server) sessionUsername(r *http.Request) (string, bool) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {
-		return false
+		return "", false
 	}
 	return s.verifySession(cookie.Value)
 }
 
-func (s *Server) signSession(expires time.Time) string {
-	payload := strconv.FormatInt(expires.Unix(), 10)
+func (s *Server) signSession(username string, expires time.Time) string {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(username)) + "." + strconv.FormatInt(expires.Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(s.sessionSecret))
 	mac.Write([]byte(payload))
 	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return payload + "." + signature
 }
 
-func (s *Server) verifySession(value string) bool {
-	payload, signature, ok := strings.Cut(value, ".")
-	if !ok {
-		return false
+func (s *Server) verifySession(value string) (string, bool) {
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 {
+		return "", false
 	}
-	expiresUnix, err := strconv.ParseInt(payload, 10, 64)
+	payload := parts[0] + "." + parts[1]
+	signature := parts[2]
+	expiresUnix, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil || time.Now().After(time.Unix(expiresUnix, 0)) {
-		return false
+		return "", false
 	}
 	mac := hmac.New(sha256.New, []byte(s.sessionSecret))
 	mac.Write([]byte(payload))
 	expected := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	return subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) == 1
+	if subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) != 1 {
+		return "", false
+	}
+	username, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", false
+	}
+	return string(username), true
 }
 
 func newSessionSecret(configured string) string {

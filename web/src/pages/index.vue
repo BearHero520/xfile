@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AccessLog, Dashboard, FileEntry, ShareEntry } from '~/api'
+import type { AccessLog, AccessLogPage, Dashboard, FileEntry, ShareEntry } from '~/api'
 import {
   Clock,
   DataAnalysis,
@@ -62,13 +62,13 @@ async function loadAll() {
       api<Dashboard>('/api/dashboard'),
       api<FileEntry[]>(`/api/files?path=${encodeURIComponent(activePath.value)}`),
       api<ShareEntry[]>('/api/shares'),
-      api<AccessLog[]>('/api/logs'),
+      api<AccessLogPage>('/api/logs?pageSize=5'),
       api<Record<string, string>>('/api/settings'),
     ])
     dashboard.value = dash
     files.value = list
     shares.value = shareList
-    logs.value = logList
+    logs.value = logList.items
     settings.value = settingMap
   }
   catch (error) {

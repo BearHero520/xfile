@@ -26,6 +26,9 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.health)
+	s.mux.HandleFunc("GET /api/public/shares/{token}", s.publicShare)
+	s.mux.HandleFunc("GET /api/public/shares/{token}/download", s.downloadShare)
+	s.mux.HandleFunc("POST /api/auth/setup", s.setup)
 	s.mux.HandleFunc("POST /api/auth/login", s.login)
 	s.mux.HandleFunc("POST /api/auth/logout", s.logout)
 	s.mux.HandleFunc("GET /api/auth/me", s.me)
@@ -46,7 +49,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/logs", s.private(s.accessLogs))
 	s.mux.HandleFunc("GET /api/settings", s.private(s.getSettings))
 	s.mux.HandleFunc("PUT /api/settings", s.private(s.saveSettings))
-	s.mux.HandleFunc("GET /s/{token}", s.openShare)
+	s.mux.HandleFunc("GET /s/{token}", s.sharePage)
 	s.mux.HandleFunc("GET /d/{token}", s.openDirectLink)
 	s.mux.Handle("/", spaHandler(s.cfg.StaticDir))
 }

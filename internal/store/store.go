@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -25,7 +26,46 @@ type Store struct {
 
 func New(db *sql.DB, cfg config.Config) *Store {
 	_ = os.MkdirAll(cfg.FilesDir, 0o755)
-	return &Store{db: db, cfg: cfg}
+	s := &Store{db: db, cfg: cfg}
+	_ = s.ensureDefaultStorageSources()
+	return s
+}
+
+var supportedStorageTypes = map[string]string{
+	"local":       "本地存储",
+	"s3":          "S3 / MinIO",
+	"webdav":      "WebDAV",
+	"aliyun_oss":  "阿里云 OSS",
+	"tencent_cos": "腾讯云 COS",
+}
+
+var storageKeyPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,64}$`)
+
+func (s *Store) ensureDefaultStorageSources() error {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM storage_sources`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	defaults := []struct {
+		name, key, sourceType, root string
+		public, enabled             int
+	}{
+		{name: "本地文件", key: "local", sourceType: "local", root: s.cfg.FilesDir, public: 1, enabled: 1},
+		{name: "S3 / MinIO", key: "s3", sourceType: "s3", public: 0, enabled: 0},
+		{name: "WebDAV", key: "webdav", sourceType: "webdav", public: 0, enabled: 0},
+		{name: "阿里云 OSS", key: "aliyun", sourceType: "aliyun_oss", public: 0, enabled: 0},
+		{name: "腾讯云 COS", key: "tencent", sourceType: "tencent_cos", public: 0, enabled: 0},
+	}
+	for index, source := range defaults {
+		if _, err := s.db.Exec(`INSERT INTO storage_sources(name, key, type, root_path, public, enabled, order_num)
+			VALUES(?, ?, ?, ?, ?, ?, ?)`, source.name, source.key, source.sourceType, source.root, source.public, source.enabled, index); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Settings() (map[string]string, error) {
@@ -36,21 +76,48 @@ func (s *Store) Settings() (map[string]string, error) {
 	defer rows.Close()
 
 	settings := map[string]string{
-		"siteName":    s.cfg.SiteName,
-		"rootName":    "首页",
-		"webdav":      "disabled",
-		"webdavMountPath": "/dav",
-		"webdavReadOnly":  "disabled",
-		"webdavUsername":  "",
-		"publicIndex": "disabled",
-		"allowUpload": "enabled",
-		"maxUploadMB": "512",
-		"ipAllowList": "",
-		"ipDenyList":  "",
-		"privatePathList": "",
-		"refererProtection": "disabled",
-		"refererAllowList":  "",
-		"downloadLimitPerMinute": "0",
+		"siteName":                s.cfg.SiteName,
+		"rootName":                "首页",
+		"webdav":                  "disabled",
+		"webdavMountPath":         "/dav",
+		"webdavReadOnly":          "disabled",
+		"webdavUsername":          "",
+		"publicIndex":             "disabled",
+		"storageProvider":         "local",
+		"storageLocalRoot":        s.cfg.FilesDir,
+		"storageS3Endpoint":       "",
+		"storageS3Bucket":         "",
+		"storageS3Region":         "",
+		"storageS3AccessKey":      "",
+		"storageS3SecretKey":      "",
+		"storageS3Prefix":         "",
+		"storageAliyunEndpoint":   "",
+		"storageAliyunBucket":     "",
+		"storageAliyunAccessKey":  "",
+		"storageAliyunSecretKey":  "",
+		"storageAliyunPrefix":     "",
+		"storageWebDAVURL":        "",
+		"storageWebDAVUsername":   "",
+		"storageWebDAVPassword":   "",
+		"storageWebDAVRoot":       "",
+		"storageTencentEndpoint":  "",
+		"storageTencentBucket":    "",
+		"storageTencentSecretID":  "",
+		"storageTencentSecretKey": "",
+		"storageTencentPrefix":    "",
+		"allowUpload":             "enabled",
+		"maxUploadMB":             "512",
+		"uploadAllowExtensions":   "",
+		"uploadDenyExtensions":    "",
+		"uploadPathAllowList":     "",
+		"uploadPathDenyList":      "",
+		"uploadOverwrite":         "enabled",
+		"ipAllowList":             "",
+		"ipDenyList":              "",
+		"privatePathList":         "",
+		"refererProtection":       "disabled",
+		"refererAllowList":        "",
+		"downloadLimitPerMinute":  "0",
 	}
 	for rows.Next() {
 		var key, value string
@@ -123,6 +190,102 @@ func (s *Store) AuthenticateUser(username, password string) (domain.User, error)
 	return user, nil
 }
 
+func (s *Store) Users() ([]domain.User, error) {
+	rows, err := s.db.Query(`SELECT id, username, role, created_at FROM users ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	users := make([]domain.User, 0)
+	for rows.Next() {
+		var user domain.User
+		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &user.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) CreateUser(username, password, role string) (domain.User, error) {
+	username = strings.TrimSpace(username)
+	role = normalizeUserRole(role)
+	if username == "" {
+		return domain.User{}, errors.New("username is required")
+	}
+	if len(password) < 8 {
+		return domain.User{}, errors.New("password must be at least 8 characters")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return domain.User{}, err
+	}
+	res, err := s.db.Exec(`INSERT INTO users(username, password_hash, role) VALUES(?, ?, ?)`, username, string(hash), role)
+	if err != nil {
+		return domain.User{}, err
+	}
+	id, _ := res.LastInsertId()
+	return domain.User{ID: id, Username: username, Role: role, CreatedAt: time.Now().Format(time.RFC3339)}, nil
+}
+
+func (s *Store) UpdateUser(id int64, username, password, role string) (domain.User, error) {
+	username = strings.TrimSpace(username)
+	role = normalizeUserRole(role)
+	if id < 1 {
+		return domain.User{}, errors.New("invalid user id")
+	}
+	if username == "" {
+		return domain.User{}, errors.New("username is required")
+	}
+	if strings.TrimSpace(password) != "" && len(password) < 8 {
+		return domain.User{}, errors.New("password must be at least 8 characters")
+	}
+
+	if strings.TrimSpace(password) == "" {
+		if _, err := s.db.Exec(`UPDATE users SET username = ?, role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, role, id); err != nil {
+			return domain.User{}, err
+		}
+	} else {
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return domain.User{}, err
+		}
+		if _, err := s.db.Exec(`UPDATE users SET username = ?, password_hash = ?, role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, string(hash), role, id); err != nil {
+			return domain.User{}, err
+		}
+	}
+
+	var user domain.User
+	err := s.db.QueryRow(`SELECT id, username, role, created_at FROM users WHERE id = ?`, id).Scan(&user.ID, &user.Username, &user.Role, &user.CreatedAt)
+	return user, err
+}
+
+func (s *Store) DeleteUser(id int64) error {
+	if id < 1 {
+		return errors.New("invalid user id")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		return err
+	}
+	if count <= 1 {
+		return errors.New("at least one user is required")
+	}
+	res, err := s.db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) SaveSettings(settings map[string]string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -136,7 +299,303 @@ func (s *Store) SaveSettings(settings map[string]string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if root, ok := settings["storageLocalRoot"]; ok {
+		_, err = s.db.Exec(`UPDATE storage_sources SET root_path = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'local'`, strings.TrimSpace(root))
+	}
+	return err
+}
+
+func (s *Store) PublicSite(loggedIn bool) (domain.PublicSite, error) {
+	settings, err := s.Settings()
+	if err != nil {
+		return domain.PublicSite{}, err
+	}
+	initialized, err := s.IsInitialized()
+	if err != nil {
+		return domain.PublicSite{}, err
+	}
+	sources, err := s.StorageSources(!loggedIn)
+	if err != nil {
+		return domain.PublicSite{}, err
+	}
+	return domain.PublicSite{
+		SiteName:    settings["siteName"],
+		RootName:    settings["rootName"],
+		Initialized: initialized,
+		LoggedIn:    loggedIn,
+		Sources:     sources,
+	}, nil
+}
+
+func (s *Store) StorageSources(publicOnly bool) ([]domain.StorageSource, error) {
+	query := `SELECT id, name, key, type, root_path, public, enabled, order_num, created_at FROM storage_sources`
+	if publicOnly {
+		query += ` WHERE public = 1 AND enabled = 1`
+	}
+	query += ` ORDER BY order_num ASC, id ASC`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sources := make([]domain.StorageSource, 0)
+	for rows.Next() {
+		source, err := scanStorageSource(rows)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
+func (s *Store) StorageSource(key string) (domain.StorageSource, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return domain.StorageSource{}, errors.New("storage source key is required")
+	}
+	row := s.db.QueryRow(`SELECT id, name, key, type, root_path, public, enabled, order_num, created_at FROM storage_sources WHERE key = ?`, key)
+	return scanStorageSource(row)
+}
+
+func (s *Store) CreateStorageSource(input domain.StorageSourceInput) (domain.StorageSource, error) {
+	normalized, err := s.normalizeStorageSourceInput(input, 0)
+	if err != nil {
+		return domain.StorageSource{}, err
+	}
+	res, err := s.db.Exec(`INSERT INTO storage_sources(name, key, type, root_path, public, enabled, order_num)
+		VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		normalized.Name,
+		normalized.Key,
+		normalized.Type,
+		normalized.RootPath,
+		boolInt(normalized.Public),
+		boolInt(normalized.Enabled),
+		normalized.OrderNum,
+	)
+	if err != nil {
+		return domain.StorageSource{}, err
+	}
+	id, _ := res.LastInsertId()
+	return s.storageSourceByID(id)
+}
+
+func (s *Store) UpdateStorageSource(id int64, input domain.StorageSourceInput) (domain.StorageSource, error) {
+	if id < 1 {
+		return domain.StorageSource{}, errors.New("invalid storage source id")
+	}
+	normalized, err := s.normalizeStorageSourceInput(input, id)
+	if err != nil {
+		return domain.StorageSource{}, err
+	}
+	res, err := s.db.Exec(`UPDATE storage_sources
+		SET name = ?, key = ?, type = ?, root_path = ?, public = ?, enabled = ?, order_num = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		normalized.Name,
+		normalized.Key,
+		normalized.Type,
+		normalized.RootPath,
+		boolInt(normalized.Public),
+		boolInt(normalized.Enabled),
+		normalized.OrderNum,
+		id,
+	)
+	if err != nil {
+		return domain.StorageSource{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return domain.StorageSource{}, err
+	}
+	if affected == 0 {
+		return domain.StorageSource{}, sql.ErrNoRows
+	}
+	return s.storageSourceByID(id)
+}
+
+func (s *Store) DeleteStorageSource(id int64) error {
+	if id < 1 {
+		return errors.New("invalid storage source id")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM storage_sources`).Scan(&count); err != nil {
+		return err
+	}
+	if count <= 1 {
+		return errors.New("at least one storage source is required")
+	}
+	res, err := s.db.Exec(`DELETE FROM storage_sources WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) storageSourceByID(id int64) (domain.StorageSource, error) {
+	row := s.db.QueryRow(`SELECT id, name, key, type, root_path, public, enabled, order_num, created_at FROM storage_sources WHERE id = ?`, id)
+	return scanStorageSource(row)
+}
+
+func (s *Store) normalizeStorageSourceInput(input domain.StorageSourceInput, currentID int64) (domain.StorageSourceInput, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	input.Key = strings.TrimSpace(input.Key)
+	input.Type = strings.TrimSpace(input.Type)
+	input.RootPath = strings.TrimSpace(input.RootPath)
+	if input.Name == "" {
+		return domain.StorageSourceInput{}, errors.New("storage source name is required")
+	}
+	if !storageKeyPattern.MatchString(input.Key) {
+		return domain.StorageSourceInput{}, errors.New("storage source key must be 2-64 letters, numbers, underscores, or dashes")
+	}
+	if _, ok := supportedStorageTypes[input.Type]; !ok {
+		return domain.StorageSourceInput{}, errors.New("storage source type is not supported")
+	}
+	var existingID int64
+	err := s.db.QueryRow(`SELECT id FROM storage_sources WHERE key = ?`, input.Key).Scan(&existingID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.StorageSourceInput{}, err
+	}
+	if err == nil && existingID != currentID {
+		return domain.StorageSourceInput{}, errors.New("storage source key already exists")
+	}
+	if input.Type == "local" {
+		if input.RootPath == "" {
+			input.RootPath = s.cfg.FilesDir
+		}
+		if err := os.MkdirAll(input.RootPath, 0o755); err != nil {
+			return domain.StorageSourceInput{}, err
+		}
+	} else if input.Enabled {
+		return domain.StorageSourceInput{}, errors.New("storage adapter is not implemented yet")
+	}
+	return input, nil
+}
+
+type storageSourceScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanStorageSource(row storageSourceScanner) (domain.StorageSource, error) {
+	var source domain.StorageSource
+	var public, enabled int
+	if err := row.Scan(&source.ID, &source.Name, &source.Key, &source.Type, &source.RootPath, &public, &enabled, &source.OrderNum, &source.CreatedAt); err != nil {
+		return domain.StorageSource{}, err
+	}
+	source.Public = public == 1
+	source.Enabled = enabled == 1
+	source.TypeLabel = supportedStorageTypes[source.Type]
+	if source.TypeLabel == "" {
+		source.TypeLabel = source.Type
+	}
+	return source, nil
+}
+
+func (s *Store) ListSourceFiles(storageKey, rel string, publicOnly bool) ([]domain.FileEntry, error) {
+	source, err := s.StorageSource(storageKey)
+	if err != nil {
+		return nil, err
+	}
+	if !source.Enabled || (publicOnly && !source.Public) {
+		return nil, errors.New("storage source is not available")
+	}
+	root, err := s.sourceSafePath(source, rel)
+	if err != nil {
+		return nil, err
+	}
+	infos, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]domain.FileEntry, 0, len(infos))
+	for _, entry := range infos {
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		entryType := "file"
+		size := info.Size()
+		if entry.IsDir() {
+			entryType = "folder"
+			size = 0
+		}
+		item := domain.FileEntry{
+			Name:       entry.Name(),
+			Path:       cleanJoin(rel, entry.Name()),
+			Type:       entryType,
+			Size:       size,
+			ModifiedAt: info.ModTime().Format(time.RFC3339),
+		}
+		if !publicOnly || !s.IsPrivatePath(item.Path) {
+			files = append(files, item)
+		}
+	}
+	return files, nil
+}
+
+func (s *Store) SourceFilePath(storageKey, rel string, publicOnly bool) (string, error) {
+	source, err := s.StorageSource(storageKey)
+	if err != nil {
+		return "", err
+	}
+	if !source.Enabled || (publicOnly && !source.Public) {
+		return "", errors.New("storage source is not available")
+	}
+	if publicOnly && s.IsPrivatePath(rel) {
+		return "", errors.New("path is private")
+	}
+	return s.sourceSafePath(source, rel)
+}
+
+func (s *Store) UploadAllowed(dirRel, filename string) error {
+	filename = filepath.Base(filename)
+	if strings.TrimSpace(filename) == "" || filename == "." {
+		return errors.New("filename is required")
+	}
+	targetRel := cleanJoin(dirRel, filename)
+	if _, err := s.safePath(targetRel); err != nil {
+		return err
+	}
+
+	if denyList := s.SettingValue("uploadPathDenyList", ""); pathMatchesRules(targetRel, denyList) {
+		return errors.New("upload path is denied")
+	}
+	if allowList := strings.TrimSpace(s.SettingValue("uploadPathAllowList", "")); allowList != "" && !pathMatchesRules(targetRel, allowList) {
+		return errors.New("upload path is not allowed")
+	}
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" {
+		ext = "(none)"
+	}
+	if extensionInList(ext, s.SettingValue("uploadDenyExtensions", "")) {
+		return errors.New("file extension is denied")
+	}
+	if allowList := strings.TrimSpace(s.SettingValue("uploadAllowExtensions", "")); allowList != "" && !extensionInList(ext, allowList) {
+		return errors.New("file extension is not allowed")
+	}
+	if s.SettingValue("uploadOverwrite", "enabled") != "enabled" {
+		target, err := s.safePath(targetRel)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(target); err == nil {
+			return errors.New("target already exists")
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ListFiles(rel string) ([]domain.FileEntry, error) {
@@ -260,6 +719,49 @@ func (s *Store) CreateFolder(rel string) (domain.FileEntry, error) {
 	}, nil
 }
 
+func (s *Store) CreateEmptyFile(rel string) (domain.FileEntry, error) {
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return domain.FileEntry{}, errors.New("file path is required")
+	}
+	if strings.HasSuffix(filepath.ToSlash(rel), "/") {
+		return domain.FileEntry{}, errors.New("file name is required")
+	}
+	dirRel := filepath.ToSlash(filepath.Dir(rel))
+	if dirRel == "." {
+		dirRel = ""
+	}
+	name := filepath.Base(rel)
+	if err := s.UploadAllowed(dirRel, name); err != nil {
+		return domain.FileEntry{}, err
+	}
+	path, err := s.safePath(rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return domain.FileEntry{}, err
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if err := file.Close(); err != nil {
+		return domain.FileEntry{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	return domain.FileEntry{
+		Name:       filepath.Base(path),
+		Path:       strings.Trim(filepath.ToSlash(rel), "/"),
+		Type:       "file",
+		Size:       info.Size(),
+		ModifiedAt: info.ModTime().Format(time.RFC3339),
+	}, nil
+}
+
 func (s *Store) MoveFile(from, to string) (domain.FileEntry, error) {
 	source, err := s.safePath(from)
 	if err != nil {
@@ -375,7 +877,7 @@ func (s *Store) Dashboard() (domain.Dashboard, error) {
 		ShareCount:     shareCount,
 		RecentFiles:    recent,
 		RecentLogs:     logs,
-		StorageSources: []string{"Local storage", "S3 / WebDAV planned", "Offline download planned"},
+		StorageSources: storageSourceSummary(settings),
 	}, nil
 }
 
@@ -792,6 +1294,77 @@ func splitPathRules(value string) []string {
 	return rules
 }
 
+func extensionInList(ext, rulesText string) bool {
+	ext = normalizeExtension(ext)
+	if ext == "" {
+		return false
+	}
+	for _, rule := range splitExtensionRules(rulesText) {
+		if rule == ext {
+			return true
+		}
+	}
+	return false
+}
+
+func splitExtensionRules(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	rules := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if rule := normalizeExtension(field); rule != "" {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+func normalizeExtension(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	if value == "(none)" {
+		return value
+	}
+	value = strings.TrimPrefix(value, "*")
+	if !strings.HasPrefix(value, ".") {
+		value = "." + value
+	}
+	return value
+}
+
+func normalizeUserRole(role string) string {
+	role = strings.TrimSpace(role)
+	if role == "super_admin" {
+		return role
+	}
+	return "admin"
+}
+
+func storageSourceSummary(settings map[string]string) []string {
+	provider := strings.TrimSpace(settings["storageProvider"])
+	labels := map[string]string{
+		"local":       "本地存储",
+		"s3":          "S3 / MinIO",
+		"aliyun_oss":  "阿里云 OSS",
+		"webdav":      "WebDAV",
+		"tencent_cos": "腾讯云 COS",
+	}
+	label := labels[provider]
+	if label == "" {
+		label = labels["local"]
+	}
+	sources := []string{label + " / 当前使用"}
+	for key, name := range labels {
+		if key != provider {
+			sources = append(sources, name)
+		}
+	}
+	return sources
+}
+
 func (s *Store) safePath(rel string) (string, error) {
 	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
 	clean := filepath.Clean(filepath.FromSlash(rel))
@@ -802,6 +1375,36 @@ func (s *Store) safePath(rel string) (string, error) {
 		return "", errors.New("invalid path")
 	}
 	root, err := filepath.Abs(s.cfg.FilesDir)
+	if err != nil {
+		return "", err
+	}
+	target, err := filepath.Abs(filepath.Join(root, clean))
+	if err != nil {
+		return "", err
+	}
+	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
+		return "", errors.New("path escapes storage root")
+	}
+	return target, nil
+}
+
+func (s *Store) sourceSafePath(source domain.StorageSource, rel string) (string, error) {
+	if source.Type != "local" {
+		return "", errors.New("storage adapter is not implemented yet")
+	}
+	rootText := strings.TrimSpace(source.RootPath)
+	if rootText == "" {
+		rootText = s.cfg.FilesDir
+	}
+	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	if clean == "." {
+		clean = ""
+	}
+	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+		return "", errors.New("invalid path")
+	}
+	root, err := filepath.Abs(rootText)
 	if err != nil {
 		return "", err
 	}
@@ -840,6 +1443,13 @@ func nullable(value string) any {
 		return nil
 	}
 	return value
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func hashSharePassword(password string) string {

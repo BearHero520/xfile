@@ -180,6 +180,10 @@ a {
   backdrop-filter: blur(18px) saturate(1.15);
 }
 
+.mobile-nav-button {
+  display: none;
+}
+
 .brand {
   display: inline-flex;
   gap: 10px;
@@ -265,6 +269,20 @@ a {
   border-right: 1px solid var(--x-color-border);
   background: color-mix(in srgb, var(--x-color-surface-raised) 88%, transparent);
   backdrop-filter: blur(18px) saturate(1.1);
+}
+
+.mobile-nav-drawer .ep-drawer__body {
+  padding: 0;
+  background: var(--x-color-surface-raised);
+}
+
+.mobile-nav-drawer .app-sidebar {
+  display: block;
+  position: static;
+  height: 100vh;
+  border-right: 0;
+  background: transparent;
+  backdrop-filter: none;
 }
 
 .side-menu {
@@ -427,6 +445,142 @@ h1 {
   background: var(--x-color-surface-solid);
 }
 
+.bucket-shell {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--x-color-border);
+  border-radius: var(--x-radius-page);
+  background: var(--x-color-surface-solid);
+  box-shadow: var(--x-shadow-panel);
+}
+
+.storage-source-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.storage-source-strip button {
+  display: grid;
+  gap: 4px;
+  min-height: 66px;
+  padding: 12px;
+  border: 1px solid var(--x-color-border);
+  border-radius: var(--x-radius-control);
+  color: var(--x-color-text);
+  text-align: left;
+  background: var(--x-color-surface-solid);
+  box-shadow: var(--x-shadow-panel);
+}
+
+.storage-source-strip button span {
+  color: var(--x-color-text-muted);
+  font-size: 12px;
+}
+
+.storage-source-strip button.active,
+.storage-source-strip button:hover {
+  border-color: color-mix(in srgb, var(--x-color-primary) 44%, var(--x-color-border));
+  background: var(--x-color-primary-soft);
+}
+
+.bucket-header,
+.bucket-toolbar {
+  display: flex;
+  gap: var(--x-space-4);
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--x-color-border);
+}
+
+.bucket-header {
+  background: color-mix(in srgb, var(--x-color-surface-raised) 78%, transparent);
+}
+
+.bucket-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+  color: var(--x-color-text-muted);
+  font-size: 13px;
+}
+
+.bucket-table-zone,
+.bucket-table {
+  width: 100%;
+}
+
+.bucket-table-zone {
+  min-height: 92px;
+}
+
+.bucket-table-zone .ep-table__empty-block {
+  min-height: 92px;
+}
+
+.bucket-actions-column .cell {
+  padding-right: 18px;
+}
+
+.bucket-row-actions {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 168px;
+  padding-right: 4px;
+}
+
+.bucket-row-actions .ep-button + .ep-button {
+  margin-left: 0;
+}
+
+.bucket-context-menu {
+  position: fixed;
+  z-index: 2200;
+  width: 172px;
+  padding: 6px;
+  border: 1px solid var(--x-color-border);
+  border-radius: var(--x-radius-small);
+  background: var(--x-color-surface-raised);
+  box-shadow: var(--x-shadow-floating);
+}
+
+.bucket-context-menu button {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--x-color-text);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.bucket-context-menu button:hover {
+  background: var(--x-color-primary-soft);
+}
+
+.bucket-context-menu button.danger {
+  color: var(--x-color-danger);
+}
+
+.bucket-context-menu hr {
+  height: 1px;
+  margin: 6px -6px;
+  border: 0;
+  background: var(--x-color-border);
+}
+
 .pane-toolbar,
 .share-browser-toolbar {
   display: flex;
@@ -553,10 +707,105 @@ h1 {
   margin-top: 18px;
 }
 
+.full-control {
+  width: 100%;
+}
+
+.user-table {
+  margin-top: 8px;
+}
+
 .access-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
+}
+
+.storage-source-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: var(--x-space-5);
+}
+
+.storage-provider-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.storage-provider-list button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 56px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: var(--x-radius-control);
+  color: var(--x-color-text-muted);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.storage-provider-list button span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.storage-provider-list button strong,
+.storage-provider-list button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-provider-list button small {
+  color: var(--x-color-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.storage-provider-list button.active,
+.storage-provider-list button:hover {
+  border-color: color-mix(in srgb, var(--x-color-primary) 38%, var(--x-color-border));
+  color: var(--x-color-primary);
+  background: var(--x-color-primary-soft);
+}
+
+.storage-config-panel {
+  min-width: 0;
+}
+
+.storage-adapter-alert {
+  margin: 12px 0 18px;
+}
+
+.storage-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.storage-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.storage-overview-grid div {
+  display: grid;
+  gap: 4px;
+}
+
+.storage-overview-grid span {
+  color: var(--x-color-text-muted);
+  font-size: 13px;
+}
+
+.storage-overview-grid strong {
+  font-size: 22px;
 }
 
 .panel-heading {
@@ -1081,6 +1330,7 @@ h1 {
   .content-grid,
   .lower-grid,
   .rule-module-grid,
+  .storage-source-layout,
   .policy-summary-grid {
     grid-template-columns: 1fr;
   }
@@ -1090,7 +1340,11 @@ h1 {
   }
 
   .app-header {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .mobile-nav-button {
+    display: inline-flex;
   }
 
   .header-search {
@@ -1104,6 +1358,8 @@ h1 {
   }
 
   .overview-band,
+  .bucket-header,
+  .bucket-toolbar,
   .pane-toolbar,
   .search-hero-panel,
   .share-hero,
@@ -1161,6 +1417,11 @@ h1 {
   .share-actions,
   .share-browser-summary {
     justify-content: flex-start;
+  }
+
+  .bucket-header,
+  .bucket-toolbar {
+    align-items: stretch;
   }
 
   .share-secondary-column {

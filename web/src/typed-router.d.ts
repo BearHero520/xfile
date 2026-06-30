@@ -28,7 +28,9 @@ declare module 'vue-router/auto-routes' {
     '/search': RouteRecordInfo<'/search', '/search', Record<never, never>, Record<never, never>>,
     '/settings': RouteRecordInfo<'/settings', '/settings', Record<never, never>, Record<never, never>>,
     '/shares': RouteRecordInfo<'/shares', '/shares', Record<never, never>, Record<never, never>>,
+    '/storage': RouteRecordInfo<'/storage', '/storage', Record<never, never>, Record<never, never>>,
     '/uploads': RouteRecordInfo<'/uploads', '/uploads', Record<never, never>, Record<never, never>>,
+    '/users': RouteRecordInfo<'/users', '/users', Record<never, never>, Record<never, never>>,
     '/webdav': RouteRecordInfo<'/webdav', '/webdav', Record<never, never>, Record<never, never>>,
   }
 }

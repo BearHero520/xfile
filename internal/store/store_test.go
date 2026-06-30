@@ -8,6 +8,7 @@ import (
 
 	"xfile/internal/config"
 	"xfile/internal/database"
+	"xfile/internal/domain"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -34,6 +35,67 @@ func TestSafePathRejectsTraversal(t *testing.T) {
 
 	if _, err := s.FilePath("../secret.txt"); err == nil {
 		t.Fatal("expected traversal path to be rejected")
+	}
+}
+
+func TestStorageSourceManagement(t *testing.T) {
+	s := newTestStore(t)
+	root := filepath.Join(t.TempDir(), "alt")
+	source, err := s.CreateStorageSource(domain.StorageSourceInput{
+		Name:     "Alt local",
+		Key:      "alt-local",
+		Type:     "local",
+		RootPath: root,
+		Public:   true,
+		Enabled:  true,
+		OrderNum: 10,
+	})
+	if err != nil {
+		t.Fatalf("create storage source: %v", err)
+	}
+	if source.ID == 0 || source.Key != "alt-local" || source.TypeLabel != "本地存储" {
+		t.Fatalf("unexpected source: %#v", source)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("expected local root to be created: %v", err)
+	}
+
+	updated, err := s.UpdateStorageSource(source.ID, domain.StorageSourceInput{
+		Name:     "Alt private",
+		Key:      "alt-private",
+		Type:     "local",
+		RootPath: root,
+		Public:   false,
+		Enabled:  true,
+		OrderNum: 2,
+	})
+	if err != nil {
+		t.Fatalf("update storage source: %v", err)
+	}
+	if updated.Key != "alt-private" || updated.Public || updated.OrderNum != 2 {
+		t.Fatalf("unexpected updated source: %#v", updated)
+	}
+
+	if _, err := s.CreateStorageSource(domain.StorageSourceInput{Name: "dup", Key: "alt-private", Type: "local", RootPath: root}); err == nil {
+		t.Fatal("expected duplicate key to fail")
+	}
+	if _, err := s.CreateStorageSource(domain.StorageSourceInput{Name: "remote", Key: "remote", Type: "s3", Enabled: true}); err == nil {
+		t.Fatal("expected enabled remote adapter to fail while unimplemented")
+	}
+	if err := s.DeleteStorageSource(source.ID); err != nil {
+		t.Fatalf("delete storage source: %v", err)
+	}
+	remaining, err := s.StorageSources(false)
+	if err != nil {
+		t.Fatalf("list remaining storage sources: %v", err)
+	}
+	for _, item := range remaining[1:] {
+		if err := s.DeleteStorageSource(item.ID); err != nil {
+			t.Fatalf("delete extra storage source: %v", err)
+		}
+	}
+	if err := s.DeleteStorageSource(remaining[0].ID); err == nil {
+		t.Fatal("expected deleting final storage source to fail")
 	}
 }
 
@@ -157,6 +219,87 @@ func TestCreateSuperAdminAndAuthenticate(t *testing.T) {
 	}
 	if authenticated, err := s.AuthenticateUser("admin", "password123"); err != nil || authenticated.Username != "admin" {
 		t.Fatalf("authenticate = %#v, %v", authenticated, err)
+	}
+}
+
+func TestManageUsers(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.CreateSuperAdmin("admin", "password123"); err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+
+	user, err := s.CreateUser("operator", "password123", "admin")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if user.Username != "operator" || user.Role != "admin" {
+		t.Fatalf("unexpected user: %#v", user)
+	}
+	updated, err := s.UpdateUser(user.ID, "ops", "newpass123", "super_admin")
+	if err != nil {
+		t.Fatalf("update user: %v", err)
+	}
+	if updated.Username != "ops" || updated.Role != "super_admin" {
+		t.Fatalf("unexpected updated user: %#v", updated)
+	}
+	if _, err := s.AuthenticateUser("ops", "newpass123"); err != nil {
+		t.Fatalf("authenticate updated user: %v", err)
+	}
+	users, err := s.Users()
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("users = %#v", users)
+	}
+	if err := s.DeleteUser(user.ID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	if err := s.DeleteUser(users[0].ID); err == nil {
+		t.Fatal("expected deleting last user to fail")
+	}
+}
+
+func TestUploadRules(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SaveSettings(map[string]string{
+		"uploadAllowExtensions": ".txt\n.md",
+		"uploadDenyExtensions":  ".exe",
+		"uploadPathAllowList":   "incoming",
+		"uploadPathDenyList":    "incoming/private",
+		"uploadOverwrite":       "disabled",
+	}); err != nil {
+		t.Fatalf("save upload rules: %v", err)
+	}
+
+	if err := s.UploadAllowed("incoming", "readme.txt"); err != nil {
+		t.Fatalf("expected upload to be allowed: %v", err)
+	}
+	if err := s.UploadAllowed("other", "readme.txt"); err == nil {
+		t.Fatal("expected path allow list to block upload")
+	}
+	if err := s.UploadAllowed("incoming/private", "readme.txt"); err == nil {
+		t.Fatal("expected path deny list to block upload")
+	}
+	if err := s.UploadAllowed("incoming", "archive.zip"); err == nil {
+		t.Fatal("expected extension allow list to block upload")
+	}
+	if err := s.UploadAllowed("incoming", "tool.exe"); err == nil {
+		t.Fatal("expected extension deny list to block upload")
+	}
+
+	target, err := s.FilePath("incoming/readme.txt")
+	if err != nil {
+		t.Fatalf("target path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := s.UploadAllowed("incoming", "readme.txt"); err == nil {
+		t.Fatal("expected overwrite rule to block existing target")
 	}
 }
 

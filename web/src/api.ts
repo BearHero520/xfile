@@ -6,6 +6,27 @@ export interface FileEntry {
   modifiedAt: string
 }
 
+export interface StorageSource {
+  id: number
+  name: string
+  key: string
+  type: string
+  typeLabel: string
+  rootPath?: string
+  public: boolean
+  enabled: boolean
+  orderNum: number
+  createdAt: string
+}
+
+export interface PublicSite {
+  siteName: string
+  rootName: string
+  initialized: boolean
+  loggedIn: boolean
+  sources: StorageSource[]
+}
+
 export interface ShareEntry {
   id: number
   token: string
@@ -59,6 +80,13 @@ export interface AccessLogPage {
   pageSize: number
 }
 
+export interface UserEntry {
+  id: number
+  username: string
+  role: string
+  createdAt: string
+}
+
 export interface Dashboard {
   siteName: string
   storageRoot: string
@@ -71,13 +99,16 @@ export interface Dashboard {
   storageSources: string[]
 }
 
-export async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
+type ApiOptions = RequestInit & { skipAuthRedirect?: boolean }
+
+export async function api<T>(url: string, options: ApiOptions = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type'))
     headers.set('Content-Type', 'application/json')
 
-  const res = await fetch(url, { ...options, headers, credentials: 'same-origin' })
-  if (res.status === 401 && !location.pathname.startsWith('/login') && !location.pathname.startsWith('/s/')) {
+  const { skipAuthRedirect, ...fetchOptions } = options
+  const res = await fetch(url, { ...fetchOptions, headers, credentials: 'same-origin' })
+  if (!skipAuthRedirect && res.status === 401 && !location.pathname.startsWith('/login') && !location.pathname.startsWith('/s/')) {
     location.href = `/login?redirect=${encodeURIComponent(location.pathname)}`
     throw new Error('请先登录')
   }
@@ -90,6 +121,10 @@ export async function api<T>(url: string, options: RequestInit = {}): Promise<T>
 
 export function fileUrl(path: string) {
   return `/api/files/download?path=${encodeURIComponent(path)}`
+}
+
+export function publicFileUrl(storageKey: string, path: string) {
+  return `/api/public/storage/${encodeURIComponent(storageKey)}/download?path=${encodeURIComponent(path)}`
 }
 
 export function shareDownloadUrl(token: string, password: string, path = '') {

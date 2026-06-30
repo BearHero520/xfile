@@ -38,6 +38,18 @@ func Migrate(db *sql.DB) error {
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS storage_sources (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			key TEXT NOT NULL UNIQUE,
+			type TEXT NOT NULL,
+			root_path TEXT NOT NULL DEFAULT '',
+			public INTEGER NOT NULL DEFAULT 1,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			order_num INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE TABLE IF NOT EXISTS shares (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			token TEXT NOT NULL UNIQUE,
@@ -84,6 +96,12 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, "direct_links", "last_access_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "storage_sources", "root_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "storage_sources", "public", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
 	return nil

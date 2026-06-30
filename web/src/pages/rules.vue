@@ -3,9 +3,11 @@ import {
   DataLine,
   Connection,
   Lock,
+  Management,
   Operation,
   Setting,
   Upload,
+  UserFilled,
 } from '@element-plus/icons-vue'
 import { computed, onMounted, ref } from 'vue'
 import { api } from '~/api'
@@ -23,11 +25,27 @@ const ruleModules = [
     type: 'success',
   },
   {
+    title: '存储源',
+    description: '配置本地存储、阿里云 OSS、WebDAV、腾讯云 COS、FTP 和 SFTP 连接信息。',
+    icon: Management,
+    to: '/storage',
+    status: '配置页',
+    type: 'success',
+  },
+  {
     title: '上传规则',
-    description: '配置上传开关和单文件大小限制，后续可扩展文件类型和目录配额。',
+    description: '配置上传开关、单文件大小、扩展名白黑名单、路径规则和覆盖策略。',
     icon: Upload,
     to: '/uploads',
-    status: '基础可用',
+    status: '已增强',
+    type: 'success',
+  },
+  {
+    title: '用户管理',
+    description: '维护后台登录账号、角色和密码，避免单账号运维带来的交接风险。',
+    icon: UserFilled,
+    to: '/users',
+    status: '已接入',
     type: 'success',
   },
   {
@@ -59,7 +77,7 @@ const ruleModules = [
 const policySummary = computed(() => [
   {
     label: '上传',
-    value: settings.value.allowUpload === 'disabled' ? '已关闭' : `开启 / ${settings.value.maxUploadMB || '512'} MB`,
+    value: uploadSummary.value,
     type: settings.value.allowUpload === 'disabled' ? 'warning' : 'success',
   },
   {
@@ -91,6 +109,13 @@ const policySummary = computed(() => [
   },
 ] as const)
 
+const uploadSummary = computed(() => {
+  if (settings.value.allowUpload === 'disabled')
+    return '已关闭'
+  const extCount = countRules(settings.value.uploadAllowExtensions || '') + countRules(settings.value.uploadDenyExtensions || '')
+  return extCount > 0 ? `开启 / ${extCount} 条扩展名` : `开启 / ${settings.value.maxUploadMB || '512'} MB`
+})
+
 const ipRuleSummary = computed(() => {
   const allowCount = settings.value.ipAllowList?.trim() ? settings.value.ipAllowList.trim().split(/\s+/).length : 0
   const denyCount = settings.value.ipDenyList?.trim() ? settings.value.ipDenyList.trim().split(/\s+/).length : 0
@@ -98,6 +123,10 @@ const ipRuleSummary = computed(() => {
     return '未配置'
   return `白 ${allowCount} / 黑 ${denyCount}`
 })
+
+function countRules(value: string) {
+  return value.trim() ? value.trim().split(/[\s,;]+/).filter(Boolean).length : 0
+}
 
 async function loadSettings() {
   loading.value = true
@@ -177,6 +206,12 @@ onMounted(loadSettings)
         </el-tag>
         <el-tag type="warning">
           下载限频
+        </el-tag>
+        <el-tag type="success">
+          上传扩展名规则
+        </el-tag>
+        <el-tag type="success">
+          用户账号管理
         </el-tag>
         <el-tag type="info">
           日志过滤与清理

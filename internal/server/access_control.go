@@ -198,6 +198,47 @@ func splitIPRules(value string) []string {
 }
 
 func validateAccessSettings(settings map[string]string) error {
+	if value, ok := settings["storageProvider"]; ok {
+		if err := validateStorageProvider(value); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["allowUpload"]; ok {
+		if err := validateSwitch(value, "上传开关"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["uploadOverwrite"]; ok {
+		if err := validateSwitch(value, "上传覆盖策略"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["maxUploadMB"]; ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || limit < 1 {
+			return errors.New("上传上限必须是大于 0 的整数")
+		}
+	}
+	if value, ok := settings["uploadAllowExtensions"]; ok {
+		if err := validateExtensionRuleList(value, "允许扩展名"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["uploadDenyExtensions"]; ok {
+		if err := validateExtensionRuleList(value, "禁止扩展名"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["uploadPathAllowList"]; ok {
+		if err := validatePathRuleList(value, "允许上传路径"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["uploadPathDenyList"]; ok {
+		if err := validatePathRuleList(value, "禁止上传路径"); err != nil {
+			return err
+		}
+	}
 	if value, ok := settings["ipAllowList"]; ok {
 		if err := validateIPRuleList(value, "IP 白名单"); err != nil {
 			return err
@@ -226,15 +267,13 @@ func validateAccessSettings(settings map[string]string) error {
 		}
 	}
 	if value, ok := settings["webdav"]; ok {
-		value = strings.TrimSpace(value)
-		if value != "enabled" && value != "disabled" {
-			return errors.New("WebDAV 开关只能是 enabled 或 disabled")
+		if err := validateSwitch(value, "WebDAV 开关"); err != nil {
+			return err
 		}
 	}
 	if value, ok := settings["webdavReadOnly"]; ok {
-		value = strings.TrimSpace(value)
-		if value != "enabled" && value != "disabled" {
-			return errors.New("WebDAV 只读模式只能是 enabled 或 disabled")
+		if err := validateSwitch(value, "WebDAV 只读模式"); err != nil {
+			return err
 		}
 	}
 	if value, ok := settings["webdavMountPath"]; ok {
@@ -244,6 +283,23 @@ func validateAccessSettings(settings map[string]string) error {
 		}
 	}
 	return nil
+}
+
+func validateSwitch(value, label string) error {
+	value = strings.TrimSpace(value)
+	if value != "enabled" && value != "disabled" {
+		return fmt.Errorf("%s只能是 enabled 或 disabled", label)
+	}
+	return nil
+}
+
+func validateStorageProvider(value string) error {
+	switch strings.TrimSpace(value) {
+	case "local", "s3", "webdav", "aliyun_oss", "tencent_cos":
+		return nil
+	default:
+		return errors.New("存储源类型无效")
+	}
 }
 
 func validateIPRuleList(value, label string) error {
@@ -279,6 +335,44 @@ func validateRefererRuleList(value string) error {
 		host := cleanHost(strings.TrimPrefix(rule, "*."))
 		if host == "" || strings.ContainsAny(host, "/?#") {
 			return fmt.Errorf("允许来源域名包含无效规则：%s", rule)
+		}
+	}
+	return nil
+}
+
+func validateExtensionRuleList(value, label string) error {
+	for _, rule := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	}) {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			continue
+		}
+		if rule == "(none)" {
+			continue
+		}
+		rule = strings.TrimPrefix(rule, "*")
+		if !strings.HasPrefix(rule, ".") {
+			rule = "." + rule
+		}
+		if len(rule) < 2 || strings.ContainsAny(rule, `/\:*?"<>|`) {
+			return fmt.Errorf("%s包含无效扩展名：%s", label, rule)
+		}
+	}
+	return nil
+}
+
+func validatePathRuleList(value, label string) error {
+	for _, rule := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t'
+	}) {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			continue
+		}
+		clean := strings.TrimPrefix(strings.ReplaceAll(rule, `\`, `/`), "/")
+		if clean == "" || strings.Contains(clean, ":") || strings.HasPrefix(clean, "../") || clean == ".." || strings.Contains(clean, "/../") {
+			return fmt.Errorf("%s包含无效路径：%s", label, rule)
 		}
 	}
 	return nil

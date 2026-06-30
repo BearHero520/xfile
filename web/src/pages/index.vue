@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import type { AccessLog, AccessLogPage, Dashboard, FileEntry, ShareEntry } from '~/api'
+import type { AccessLog, AccessLogPage, Dashboard, FileEntry, PublicSite, ShareEntry, StorageSource } from '~/api'
 import {
   Clock,
+  CopyDocument,
   DataAnalysis,
   Delete,
   Document,
   Download,
   Edit,
-  Files,
   Folder,
   Link,
   Plus,
@@ -17,9 +17,9 @@ import {
   View,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { api, fileUrl, formatBytes, formatTime } from '~/api'
+import { api, fileUrl, formatBytes, formatTime, publicFileUrl } from '~/api'
 
 type PreviewKind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'unsupported'
 
@@ -34,9 +34,18 @@ const emptyDashboard: Dashboard = {
   shareCount: 0,
   recentFiles: [],
   recentLogs: [],
-  storageSources: ['本地存储', 'S3 / WebDAV 规划', '离线下载规划'],
+  storageSources: [],
 }
 
+const emptySite: PublicSite = {
+  siteName: 'XFile',
+  rootName: '首页',
+  initialized: false,
+  loggedIn: false,
+  sources: [],
+}
+
+const site = ref<PublicSite>(emptySite)
 const dashboard = ref<Dashboard>(emptyDashboard)
 const files = ref<FileEntry[]>([])
 const shares = ref<ShareEntry[]>([])
@@ -45,6 +54,7 @@ const settings = ref<Record<string, string>>({})
 const loading = ref(false)
 const searching = ref(false)
 const activePath = ref('')
+const activeSourceKey = ref('')
 const keyword = ref('')
 const searchMode = ref<'current' | 'global'>('current')
 const globalResults = ref<FileEntry[]>([])
@@ -54,6 +64,20 @@ const previewFile = ref<FileEntry>()
 const previewKind = ref<PreviewKind>('unsupported')
 const previewText = ref('')
 const previewLoading = ref(false)
+const selectedFiles = ref<FileEntry[]>([])
+const contextMenu = ref({
+  visible: false,
+  x: 0,
+  y: 0,
+  file: undefined as FileEntry | undefined,
+  directory: false,
+})
+
+const isLoggedIn = computed(() => site.value.loggedIn)
+const publicSources = computed(() => site.value.sources.filter(source => source.enabled && (isLoggedIn.value || source.public)))
+const activeSource = computed<StorageSource | undefined>(() => publicSources.value.find(source => source.key === activeSourceKey.value) || publicSources.value[0])
+const selectedCount = computed(() => selectedFiles.value.length)
+const currentStorageSource = computed(() => activeSource.value ? `${activeSource.value.name} / ${activeSource.value.typeLabel}` : '暂无公开存储源')
 
 const searchModeOptions = [
   { label: '当前目录', value: 'current' },
@@ -62,7 +86,7 @@ const searchModeOptions = [
 
 const displayedFiles = computed(() => {
   const term = keyword.value.trim().toLowerCase()
-  if (searchMode.value === 'global')
+  if (isLoggedIn.value && searchMode.value === 'global')
     return term ? globalResults.value : files.value
   if (!term)
     return files.value
@@ -70,33 +94,70 @@ const displayedFiles = computed(() => {
 })
 
 const fileEmptyText = computed(() => {
+  if (!activeSource.value)
+    return '暂无可访问的存储源'
   if (searchMode.value === 'global' && keyword.value.trim())
     return '未找到匹配文件'
   return '当前目录暂无文件'
 })
 
 const breadcrumbs = computed(() => {
+  const rootLabel = site.value.rootName || settings.value.rootName || '首页'
   const parts = activePath.value ? activePath.value.split('/') : []
-  return [{ label: settings.value.rootName || '首页', path: '' }].concat(
+  return [{ label: rootLabel, path: '' }].concat(
     parts.map((part, index) => ({ label: part, path: parts.slice(0, index + 1).join('/') })),
   )
 })
 
+function setSource(key: string) {
+  activeSourceKey.value = key
+  activePath.value = ''
+  keyword.value = ''
+  searchMode.value = 'current'
+  globalResults.value = []
+  void loadFiles()
+}
+
+async function loadSite() {
+  site.value = await api<PublicSite>('/api/public/site', { skipAuthRedirect: true } as RequestInit)
+  if (!activeSourceKey.value && site.value.sources.length)
+    activeSourceKey.value = site.value.sources[0].key
+}
+
+async function loadFiles() {
+  if (!activeSource.value) {
+    files.value = []
+    return
+  }
+  if (isLoggedIn.value) {
+    files.value = await api<FileEntry[]>(`/api/files?path=${encodeURIComponent(activePath.value)}`)
+  }
+  else {
+    files.value = await api<FileEntry[]>(`/api/public/storage/${encodeURIComponent(activeSource.value.key)}/files?path=${encodeURIComponent(activePath.value)}`, { skipAuthRedirect: true } as RequestInit)
+  }
+  selectedFiles.value = []
+}
+
+async function loadAdminData() {
+  if (!isLoggedIn.value)
+    return
+  const [dash, shareList, logList, settingMap] = await Promise.all([
+    api<Dashboard>('/api/dashboard'),
+    api<ShareEntry[]>('/api/shares'),
+    api<AccessLogPage>('/api/logs?pageSize=5'),
+    api<Record<string, string>>('/api/settings'),
+  ])
+  dashboard.value = dash
+  shares.value = shareList
+  logs.value = logList.items
+  settings.value = settingMap
+}
+
 async function loadAll() {
   loading.value = true
   try {
-    const [dash, list, shareList, logList, settingMap] = await Promise.all([
-      api<Dashboard>('/api/dashboard'),
-      api<FileEntry[]>(`/api/files?path=${encodeURIComponent(activePath.value)}`),
-      api<ShareEntry[]>('/api/shares'),
-      api<AccessLogPage>('/api/logs?pageSize=5'),
-      api<Record<string, string>>('/api/settings'),
-    ])
-    dashboard.value = dash
-    files.value = list
-    shares.value = shareList
-    logs.value = logList.items
-    settings.value = settingMap
+    await loadSite()
+    await Promise.all([loadFiles(), loadAdminData()])
   }
   catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '加载失败')
@@ -107,7 +168,7 @@ async function loadAll() {
 }
 
 async function runSearch() {
-  if (searchMode.value !== 'global') {
+  if (!isLoggedIn.value || searchMode.value !== 'global') {
     globalResults.value = []
     return
   }
@@ -137,7 +198,13 @@ function openFolder(file: FileEntry) {
   searchMode.value = 'current'
   keyword.value = ''
   globalResults.value = []
-  void loadAll()
+  void loadFiles()
+}
+
+function currentFileUrl(path: string) {
+  if (isLoggedIn.value)
+    return fileUrl(path)
+  return publicFileUrl(activeSource.value?.key || 'local', path)
 }
 
 function openFile(file: FileEntry) {
@@ -149,7 +216,16 @@ function openFile(file: FileEntry) {
     void openPreview(file)
     return
   }
-  window.open(fileUrl(file.path), '_blank')
+  window.open(currentFileUrl(file.path), '_blank')
+}
+
+function openInNewTab(file: FileEntry) {
+  if (file.type === 'folder') {
+    const query = new URLSearchParams({ source: activeSourceKey.value, path: file.path })
+    window.open(`/?${query.toString()}`, '_blank')
+    return
+  }
+  window.open(currentFileUrl(file.path), '_blank')
 }
 
 function fileExtension(file: FileEntry) {
@@ -182,7 +258,7 @@ function canPreview(file: FileEntry) {
 async function openPreview(file: FileEntry) {
   const kind = previewType(file)
   if (kind === 'unsupported') {
-    window.open(fileUrl(file.path), '_blank')
+    window.open(currentFileUrl(file.path), '_blank')
     return
   }
   previewFile.value = file
@@ -198,7 +274,7 @@ async function openPreview(file: FileEntry) {
       previewText.value = '文本文件超过 2 MB，请下载后查看。'
       return
     }
-    const res = await fetch(fileUrl(file.path), { credentials: 'same-origin' })
+    const res = await fetch(currentFileUrl(file.path), { credentials: 'same-origin' })
     if (!res.ok)
       throw new Error(await res.text() || res.statusText)
     previewText.value = await res.text()
@@ -213,7 +289,15 @@ async function openPreview(file: FileEntry) {
 
 function downloadPreview() {
   if (previewFile.value)
-    window.open(fileUrl(previewFile.value.path), '_blank')
+    window.open(currentFileUrl(previewFile.value.path), '_blank')
+}
+
+function downloadFile(file: FileEntry) {
+  if (file.type === 'folder') {
+    ElMessage.info('文件夹打包下载待接入')
+    return
+  }
+  window.open(currentFileUrl(file.path), '_blank')
 }
 
 async function uploadFile(event: Event) {
@@ -227,7 +311,7 @@ async function uploadFile(event: Event) {
   await api('/api/files/upload', { method: 'POST', body: form })
   input.value = ''
   ElMessage.success('上传完成')
-  await loadAll()
+  await loadFiles()
 }
 
 async function createFolder() {
@@ -238,7 +322,18 @@ async function createFolder() {
   const path = [activePath.value, value].filter(Boolean).join('/')
   await api('/api/files/folders', { method: 'POST', body: JSON.stringify({ path }) })
   ElMessage.success('目录已创建')
-  await loadAll()
+  await loadFiles()
+}
+
+async function createEmptyFile() {
+  const { value } = await ElMessageBox.prompt('输入文件名称，例如 notes.txt', '新建文件', {
+    inputPattern: /^[^\\/]+$/,
+    inputErrorMessage: '文件名称不能包含斜杠',
+  })
+  const path = [activePath.value, value].filter(Boolean).join('/')
+  await api('/api/files/empty', { method: 'POST', body: JSON.stringify({ path }) })
+  ElMessage.success('文件已创建')
+  await loadFiles()
 }
 
 async function renameFile(file: FileEntry) {
@@ -251,7 +346,7 @@ async function renameFile(file: FileEntry) {
   const to = [base, value].filter(Boolean).join('/')
   await api('/api/files', { method: 'PATCH', body: JSON.stringify({ from: file.path, to }) })
   ElMessage.success('已重命名')
-  await loadAll()
+  await loadFiles()
 }
 
 async function moveFile(file: FileEntry) {
@@ -260,7 +355,7 @@ async function moveFile(file: FileEntry) {
   })
   await api('/api/files', { method: 'PATCH', body: JSON.stringify({ from: file.path, to: value }) })
   ElMessage.success('已移动')
-  await loadAll()
+  await loadFiles()
 }
 
 async function createShare(file: FileEntry) {
@@ -287,95 +382,193 @@ async function removeFile(file: FileEntry) {
   await ElMessageBox.confirm(`确认删除 ${file.name}？`, '删除文件')
   await api(`/api/files?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' })
   ElMessage.success('已删除')
-  await loadAll()
+  await loadFiles()
+}
+
+async function removeSelected() {
+  if (!selectedFiles.value.length)
+    return
+  await ElMessageBox.confirm(`确认删除选中的 ${selectedFiles.value.length} 项？`, '批量删除')
+  for (const file of selectedFiles.value)
+    await api(`/api/files?path=${encodeURIComponent(file.path)}`, { method: 'DELETE' })
+  selectedFiles.value = []
+  ElMessage.success('已删除')
+  await loadFiles()
+}
+
+async function copyPath(file: FileEntry) {
+  await navigator.clipboard.writeText(file.path)
+  ElMessage.success('路径已复制')
+}
+
+function onSelectionChange(rows: FileEntry[]) {
+  selectedFiles.value = rows
+}
+
+function menuPosition(event: MouseEvent) {
+  const menuWidth = 172
+  const menuHeight = 440
+  const gap = 12
+  return {
+    x: Math.max(gap, Math.min(event.clientX, window.innerWidth - menuWidth - gap)),
+    y: Math.max(gap, Math.min(event.clientY, window.innerHeight - menuHeight - gap)),
+  }
+}
+
+function openContextMenu(row: FileEntry, _column: unknown, event: MouseEvent) {
+  if (!isLoggedIn.value)
+    return
+  event.preventDefault()
+  const position = menuPosition(event)
+  contextMenu.value = {
+    visible: true,
+    x: position.x,
+    y: position.y,
+    file: row,
+    directory: false,
+  }
+}
+
+function openDirectoryContextMenu(event: MouseEvent) {
+  if (!isLoggedIn.value)
+    return
+  const target = event.target as HTMLElement
+  if (target.closest('.ep-table__row') || target.closest('.bucket-context-menu'))
+    return
+  event.preventDefault()
+  const position = menuPosition(event)
+  contextMenu.value = {
+    visible: true,
+    x: position.x,
+    y: position.y,
+    file: undefined,
+    directory: true,
+  }
+}
+
+function closeContextMenu() {
+  contextMenu.value.visible = false
+}
+
+function runContextAction(action: (file: FileEntry) => void | Promise<void>) {
+  const file = contextMenu.value.file
+  closeContextMenu()
+  if (file)
+    void action(file)
 }
 
 onMounted(() => {
+  window.addEventListener('click', closeContextMenu)
   const path = route.query.path
+  const source = route.query.source
   if (typeof path === 'string')
     activePath.value = path
+  if (typeof source === 'string')
+    activeSourceKey.value = source
   void loadAll()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('click', closeContextMenu)
 })
 </script>
 
 <template>
   <div class="workspace" v-loading="loading">
-    <section class="overview-band">
-      <div>
-        <p class="eyebrow">
-          Self-hosted file operations
-        </p>
-        <h1>{{ dashboard.siteName }}</h1>
-        <p class="lede">
-          统一管理本地存储、分享链接、直链、访问日志与访问规则。
-        </p>
-      </div>
-      <div class="quick-actions">
-        <input ref="uploader" class="hidden-input" type="file" @change="uploadFile">
-        <el-button type="primary" :icon="Upload" @click="uploader?.click()">
-          上传文件
-        </el-button>
-        <el-button :icon="Plus" @click="createFolder">
-          新建目录
-        </el-button>
-      </div>
+    <section v-if="!isLoggedIn && publicSources.length > 1" class="storage-source-strip">
+      <button
+        v-for="source in publicSources"
+        :key="source.key"
+        :class="{ active: activeSource?.key === source.key }"
+        @click="setSource(source.key)"
+      >
+        <strong>{{ source.name }}</strong>
+        <span>{{ source.typeLabel }}</span>
+      </button>
     </section>
 
-    <section class="metric-grid">
-      <article class="metric">
-        <el-icon><Files /></el-icon>
-        <span>文件</span>
-        <strong>{{ dashboard.fileCount }}</strong>
-      </article>
-      <article class="metric">
-        <el-icon><Folder /></el-icon>
-        <span>文件夹</span>
-        <strong>{{ dashboard.folderCount }}</strong>
-      </article>
-      <article class="metric">
-        <el-icon><DataAnalysis /></el-icon>
-        <span>占用空间</span>
-        <strong>{{ formatBytes(dashboard.totalBytes) }}</strong>
-      </article>
-      <article class="metric">
-        <el-icon><Link /></el-icon>
-        <span>分享链接</span>
-        <strong>{{ dashboard.shareCount }}</strong>
-      </article>
-    </section>
-
-    <section class="content-grid">
-      <main class="file-pane">
-        <div class="pane-toolbar">
-          <el-breadcrumb separator="/">
-            <el-breadcrumb-item v-for="item in breadcrumbs" :key="item.path">
-              <button class="crumb-button" @click="activePath = item.path; loadAll()">
-                {{ item.label }}
-              </button>
-            </el-breadcrumb-item>
-          </el-breadcrumb>
-          <div class="file-search-tools">
-            <el-segmented
-              v-model="searchMode"
-              :options="searchModeOptions"
-              size="small"
-              @change="changeSearchMode"
-            />
-            <el-input
-              v-model="keyword"
-              class="search-input"
-              :placeholder="searchMode === 'global' ? '搜索全部文件' : '搜索当前目录'"
-              :prefix-icon="Search"
-              :loading="searching"
-              clearable
-              @input="runSearch"
-              @clear="runSearch"
-            />
+    <section class="bucket-shell">
+      <div class="bucket-header">
+        <div>
+          <p class="eyebrow">
+            {{ isLoggedIn ? 'Storage bucket' : 'Public bucket' }}
+          </p>
+          <h1>{{ site.rootName || dashboard.siteName }}</h1>
+          <div class="bucket-meta">
+            <el-tag effect="plain">
+              {{ currentStorageSource }}
+            </el-tag>
+            <template v-if="isLoggedIn">
+              <span>{{ dashboard.fileCount }} 文件</span>
+              <span>{{ dashboard.folderCount }} 文件夹</span>
+              <span>{{ formatBytes(dashboard.totalBytes) }}</span>
+            </template>
+            <span v-else>{{ files.length }} 项</span>
           </div>
         </div>
+        <div class="quick-actions">
+          <input ref="uploader" class="hidden-input" type="file" @change="uploadFile">
+          <RouterLink v-if="!isLoggedIn" to="/login">
+            <el-button type="primary">
+              登录管理
+            </el-button>
+          </RouterLink>
+          <el-button :icon="Clock" @click="loadAll">
+            刷新
+          </el-button>
+          <template v-if="isLoggedIn">
+            <el-button :icon="Plus" @click="createFolder">
+              新建文件夹
+            </el-button>
+            <el-button type="primary" :icon="Upload" @click="uploader?.click()">
+              上传文件
+            </el-button>
+          </template>
+        </div>
+      </div>
 
-        <el-table :data="displayedFiles" class="file-table" :empty-text="fileEmptyText">
-          <el-table-column label="文件名" min-width="260">
+      <div class="bucket-toolbar">
+        <el-breadcrumb separator="/">
+          <el-breadcrumb-item v-for="item in breadcrumbs" :key="item.path">
+            <button class="crumb-button" @click="activePath = item.path; loadFiles()">
+              {{ item.label }}
+            </button>
+          </el-breadcrumb-item>
+        </el-breadcrumb>
+        <div class="file-search-tools">
+          <el-button v-if="isLoggedIn && selectedCount" type="danger" plain :icon="Delete" @click="removeSelected">
+            删除 {{ selectedCount }}
+          </el-button>
+          <el-segmented
+            v-if="isLoggedIn"
+            v-model="searchMode"
+            :options="searchModeOptions"
+            size="small"
+            @change="changeSearchMode"
+          />
+          <el-input
+            v-model="keyword"
+            class="search-input"
+            :placeholder="isLoggedIn && searchMode === 'global' ? '搜索全部文件' : '搜索当前目录'"
+            :prefix-icon="Search"
+            :loading="searching"
+            clearable
+            @input="runSearch"
+            @clear="runSearch"
+          />
+        </div>
+      </div>
+
+      <div class="bucket-table-zone" @contextmenu="openDirectoryContextMenu">
+        <el-table
+          :data="displayedFiles"
+          class="bucket-table"
+          :empty-text="fileEmptyText"
+          @selection-change="onSelectionChange"
+          @row-contextmenu="openContextMenu"
+        >
+          <el-table-column v-if="isLoggedIn" type="selection" width="44" />
+          <el-table-column label="文件名" min-width="360" sortable>
             <template #default="{ row }">
               <button class="file-name" @click="openFile(row)">
                 <el-icon>
@@ -386,62 +579,104 @@ onMounted(() => {
               </button>
             </template>
           </el-table-column>
-          <el-table-column label="大小" width="120">
-            <template #default="{ row }">
-              {{ formatBytes(row.size) }}
-            </template>
-          </el-table-column>
-          <el-table-column label="修改时间" width="150">
+          <el-table-column label="修改时间" width="190" sortable>
             <template #default="{ row }">
               {{ formatTime(row.modifiedAt) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="320" align="right">
+          <el-table-column label="大小" width="150" sortable>
             <template #default="{ row }">
-              <el-button v-if="row.type === 'file' && canPreview(row)" text :icon="View" title="预览" @click="openPreview(row)" />
-              <el-button text :icon="Download" title="下载" @click="openFile(row)" />
-              <el-button text :icon="Share" title="分享" @click="createShare(row)" />
-              <el-button text :icon="Link" title="直链" @click="createDirectLink(row)" />
-              <el-button text :icon="Edit" title="重命名" @click="renameFile(row)" />
-              <el-button text title="移动" @click="moveFile(row)">
-                移动
-              </el-button>
-              <el-button text type="danger" :icon="Delete" title="删除" @click="removeFile(row)" />
+              {{ row.type === 'folder' ? '-' : formatBytes(row.size) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="" width="240" align="right" class-name="bucket-actions-column">
+            <template #default="{ row }">
+              <div class="bucket-row-actions">
+                <el-button v-if="row.type === 'file' && canPreview(row)" text :icon="View" title="预览" @click="openPreview(row)" />
+                <el-button text :icon="Download" title="下载" @click="downloadFile(row)" />
+                <template v-if="isLoggedIn">
+                  <el-button text :icon="Share" title="分享" @click="createShare(row)" />
+                  <el-button text type="danger" :icon="Delete" title="删除" @click="removeFile(row)" />
+                </template>
+              </div>
             </template>
           </el-table-column>
         </el-table>
-      </main>
+      </div>
 
-      <aside class="side-stack">
-        <section class="panel">
-          <div class="panel-title">
-            <el-icon><Folder /></el-icon>
-            <span>存储源</span>
-          </div>
-          <div v-for="source in dashboard.storageSources" :key="source" class="source-row">
-            <span>{{ source }}</span>
-            <el-tag size="small" effect="plain">
-              Ready
-            </el-tag>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">
-            <el-icon><Clock /></el-icon>
-            <span>最近访问</span>
-          </div>
-          <div v-for="log in logs.slice(0, 5)" :key="log.id" class="list-row">
-            <div>
-              <strong>{{ log.action }} / {{ log.path || '/' }}</strong>
-              <span>{{ log.ip }} / {{ formatTime(log.createdAt) }}</span>
-            </div>
-          </div>
-        </section>
-      </aside>
+      <div
+        v-if="contextMenu.visible && (contextMenu.file || contextMenu.directory)"
+        class="bucket-context-menu"
+        :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+        @click.stop
+      >
+        <template v-if="contextMenu.file">
+          <button @click="runContextAction(openFile)">
+            <el-icon><Folder /></el-icon><span>打开</span>
+          </button>
+          <button @click="runContextAction(openInNewTab)">
+            <el-icon><Document /></el-icon><span>新标签打开</span>
+          </button>
+          <button @click="runContextAction(downloadFile)">
+            <el-icon><Download /></el-icon><span>打包/下载</span>
+          </button>
+          <button @click="runContextAction(createShare)">
+            <el-icon><Share /></el-icon><span>创建分享</span>
+          </button>
+          <button @click="runContextAction(createDirectLink)">
+            <el-icon><Link /></el-icon><span>生成直链</span>
+          </button>
+          <button @click="runContextAction(renameFile)">
+            <el-icon><Edit /></el-icon><span>重命名</span>
+          </button>
+          <button @click="runContextAction(moveFile)">
+            <el-icon><Link /></el-icon><span>移动</span>
+          </button>
+          <button @click="runContextAction(copyPath)">
+            <el-icon><CopyDocument /></el-icon><span>复制路径</span>
+          </button>
+          <button class="danger" @click="runContextAction(removeFile)">
+            <el-icon><Delete /></el-icon><span>删除</span>
+          </button>
+          <hr>
+        </template>
+        <button @click="closeContextMenu(); createFolder()">
+          <el-icon><Plus /></el-icon><span>新建文件夹</span>
+        </button>
+        <button @click="closeContextMenu(); createEmptyFile()">
+          <el-icon><Document /></el-icon><span>新建文件</span>
+        </button>
+        <button @click="closeContextMenu(); uploader?.click()">
+          <el-icon><Upload /></el-icon><span>上传文件</span>
+        </button>
+        <button @click="closeContextMenu(); loadAll()">
+          <el-icon><Clock /></el-icon><span>刷新</span>
+        </button>
+      </div>
     </section>
 
-    <section class="lower-grid">
+    <section v-if="isLoggedIn" class="lower-grid">
+      <section class="panel">
+        <div class="panel-title">
+          <el-icon><DataAnalysis /></el-icon>
+          <span>存储概览</span>
+        </div>
+        <div class="storage-overview-grid">
+          <div>
+            <span>文件</span>
+            <strong>{{ dashboard.fileCount }}</strong>
+          </div>
+          <div>
+            <span>文件夹</span>
+            <strong>{{ dashboard.folderCount }}</strong>
+          </div>
+          <div>
+            <span>分享</span>
+            <strong>{{ dashboard.shareCount }}</strong>
+          </div>
+        </div>
+      </section>
+
       <section class="panel">
         <div class="panel-title">
           <el-icon><Share /></el-icon>
@@ -460,13 +695,13 @@ onMounted(() => {
 
       <section class="panel">
         <div class="panel-title">
-          <el-icon><Files /></el-icon>
-          <span>最近文件</span>
+          <el-icon><Clock /></el-icon>
+          <span>最近访问</span>
         </div>
-        <div v-for="file in dashboard.recentFiles" :key="file.path" class="list-row">
+        <div v-for="log in logs.slice(0, 5)" :key="log.id" class="list-row">
           <div>
-            <strong>{{ file.path }}</strong>
-            <span>{{ formatBytes(file.size) }} / {{ formatTime(file.modifiedAt) }}</span>
+            <strong>{{ log.action }} / {{ log.path || '/' }}</strong>
+            <span>{{ log.ip }} / {{ formatTime(log.createdAt) }}</span>
           </div>
         </div>
       </section>
@@ -474,10 +709,10 @@ onMounted(() => {
 
     <el-dialog v-model="previewVisible" class="preview-dialog" :title="previewFile?.name || '文件预览'" width="min(92vw, 960px)" destroy-on-close>
       <div v-if="previewFile" class="preview-body" v-loading="previewLoading">
-        <img v-if="previewKind === 'image'" class="preview-image" :src="fileUrl(previewFile.path)" :alt="previewFile.name">
-        <video v-else-if="previewKind === 'video'" class="preview-media" :src="fileUrl(previewFile.path)" controls />
-        <audio v-else-if="previewKind === 'audio'" class="preview-audio" :src="fileUrl(previewFile.path)" controls />
-        <iframe v-else-if="previewKind === 'pdf'" class="preview-frame" :src="fileUrl(previewFile.path)" />
+        <img v-if="previewKind === 'image'" class="preview-image" :src="currentFileUrl(previewFile.path)" :alt="previewFile.name">
+        <video v-else-if="previewKind === 'video'" class="preview-media" :src="currentFileUrl(previewFile.path)" controls />
+        <audio v-else-if="previewKind === 'audio'" class="preview-audio" :src="currentFileUrl(previewFile.path)" controls />
+        <iframe v-else-if="previewKind === 'pdf'" class="preview-frame" :src="currentFileUrl(previewFile.path)" />
         <pre v-else-if="previewKind === 'text'" class="preview-text">{{ previewText }}</pre>
         <el-empty v-else description="暂不支持预览此文件类型" />
       </div>

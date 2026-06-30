@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"xfile/internal/domain"
 )
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -21,6 +23,101 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, data)
+}
+
+func (s *Server) publicSite(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.PublicSite(s.isAuthenticated(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
+}
+
+func (s *Server) storageSources(w http.ResponseWriter, r *http.Request) {
+	sources, err := s.store.StorageSources(false)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sources)
+}
+
+func (s *Server) createStorageSource(w http.ResponseWriter, r *http.Request) {
+	var req domain.StorageSourceInput
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	source, err := s.store.CreateStorageSource(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("storage-create", source.Key, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusCreated, source)
+}
+
+func (s *Server) updateStorageSource(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req domain.StorageSourceInput
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	source, err := s.store.UpdateStorageSource(id, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("storage-update", source.Key, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusOK, source)
+}
+
+func (s *Server) deleteStorageSource(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.DeleteStorageSource(id); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("storage-delete", strconv.FormatInt(id, 10), clientIP(r), r.UserAgent())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) publicStorageFiles(w http.ResponseWriter, r *http.Request) {
+	storageKey := r.PathValue("key")
+	rel := r.URL.Query().Get("path")
+	files, err := s.store.ListSourceFiles(storageKey, rel, true)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("public-list", storageKey+":"+rel, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusOK, files)
+}
+
+func (s *Server) publicStorageDownload(w http.ResponseWriter, r *http.Request) {
+	storageKey := r.PathValue("key")
+	rel := r.URL.Query().Get("path")
+	path, err := s.store.SourceFilePath(storageKey, rel, true)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	downloadPath := storageKey + ":" + rel
+	if !s.enforceDownloadLimit(w, r, downloadPath) {
+		return
+	}
+	_ = s.store.LogAccess("public-download", downloadPath, clientIP(r), r.UserAgent())
+	http.ServeFile(w, r, path)
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +178,10 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	name := filepath.Base(header.Filename)
+	if err := s.store.UploadAllowed(r.FormValue("path"), name); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
 	target := filepath.Join(dir, name)
 	out, err := os.Create(target)
 	if err != nil {
@@ -112,6 +213,23 @@ func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.LogAccess("mkdir", req.Path, clientIP(r), r.UserAgent())
 	writeJSON(w, http.StatusCreated, folder)
+}
+
+func (s *Server) createEmptyFile(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	file, err := s.store.CreateEmptyFile(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("touch", req.Path, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusCreated, file)
 }
 
 func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
@@ -351,6 +469,72 @@ func (s *Server) deleteAccessLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.LogAccess("logs-cleanup", strconv.FormatInt(deleted, 10), clientIP(r), r.UserAgent())
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
+}
+
+func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.store.Users()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	user, err := s.store.CreateUser(req.Username, req.Password, req.Role)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("user-create", user.Username, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusCreated, user)
+}
+
+func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	user, err := s.store.UpdateUser(id, req.Username, req.Password, req.Role)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("user-update", user.Username, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.DeleteUser(id); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("user-delete", strconv.FormatInt(id, 10), clientIP(r), r.UserAgent())
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {

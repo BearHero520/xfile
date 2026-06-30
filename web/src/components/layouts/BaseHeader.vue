@@ -1,8 +1,12 @@
 <script lang="ts" setup>
-import { Bell, Moon, Search, Sunny, SwitchButton } from '@element-plus/icons-vue'
+import { Bell, Menu, Moon, Search, Sunny, SwitchButton } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { api } from '~/api'
 import { toggleDark } from '~/composables'
+
+const emit = defineEmits<{
+  openNav: []
+}>()
 
 async function logout() {
   await api('/api/auth/logout', { method: 'POST' })
@@ -13,6 +17,7 @@ async function logout() {
 
 <template>
   <header class="app-header">
+    <el-button class="mobile-nav-button" :icon="Menu" circle title="打开导航" @click="emit('openNav')" />
     <RouterLink class="brand" to="/">
       <span class="brand-mark">XF</span>
       <span>XFile</span>

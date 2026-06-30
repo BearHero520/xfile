@@ -5,11 +5,13 @@ import {
   Files,
   Link,
   Lock,
+  Management,
   Operation,
   Search,
   Setting,
   Share,
   Upload,
+  UserFilled,
 } from '@element-plus/icons-vue'
 </script>
 
@@ -40,6 +42,12 @@ import {
           直链 / 短链
         </template>
       </el-menu-item>
+      <el-menu-item index="/storage">
+        <el-icon><Management /></el-icon>
+        <template #title>
+          存储源
+        </template>
+      </el-menu-item>
       <el-menu-item index="/webdav">
         <el-icon><Connection /></el-icon>
         <template #title>
@@ -62,6 +70,12 @@ import {
         <el-icon><Lock /></el-icon>
         <template #title>
           访问控制
+        </template>
+      </el-menu-item>
+      <el-menu-item index="/users">
+        <el-icon><UserFilled /></el-icon>
+        <template #title>
+          用户管理
         </template>
       </el-menu-item>
       <el-menu-item index="/logs">

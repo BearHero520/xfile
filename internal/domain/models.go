@@ -8,6 +8,37 @@ type FileEntry struct {
 	ModifiedAt string `json:"modifiedAt"`
 }
 
+type StorageSource struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Key       string `json:"key"`
+	Type      string `json:"type"`
+	TypeLabel string `json:"typeLabel"`
+	RootPath  string `json:"rootPath,omitempty"`
+	Public    bool   `json:"public"`
+	Enabled   bool   `json:"enabled"`
+	OrderNum  int    `json:"orderNum"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type StorageSourceInput struct {
+	Name     string `json:"name"`
+	Key      string `json:"key"`
+	Type     string `json:"type"`
+	RootPath string `json:"rootPath"`
+	Public   bool   `json:"public"`
+	Enabled  bool   `json:"enabled"`
+	OrderNum int    `json:"orderNum"`
+}
+
+type PublicSite struct {
+	SiteName    string          `json:"siteName"`
+	RootName    string          `json:"rootName"`
+	Initialized bool            `json:"initialized"`
+	LoggedIn    bool            `json:"loggedIn"`
+	Sources     []StorageSource `json:"sources"`
+}
+
 type Share struct {
 	ID            int64  `json:"id"`
 	Token         string `json:"token"`

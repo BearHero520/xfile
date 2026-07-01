@@ -55,6 +55,7 @@ const loading = ref(false)
 const searching = ref(false)
 const activePath = ref('')
 const activeSourceKey = ref('')
+const directoryPassword = ref('')
 const keyword = ref('')
 const searchMode = ref<'current' | 'global'>('current')
 const globalResults = ref<FileEntry[]>([])
@@ -79,6 +80,7 @@ const selectableSources = computed(() => isLoggedIn.value ? site.value.sources :
 const activeSource = computed<StorageSource | undefined>(() => selectableSources.value.find(source => source.key === activeSourceKey.value) || selectableSources.value[0])
 const selectedCount = computed(() => selectedFiles.value.length)
 const currentStorageSource = computed(() => activeSource.value ? `${activeSource.value.name} / ${activeSource.value.typeLabel}` : '暂无存储源')
+const disabledOperations = computed(() => new Set((settings.value.disabledOperations || '').split(/[\s,;]+/).filter(Boolean)))
 
 const searchModeOptions = [
   { label: '当前目录', value: 'current' },
@@ -115,6 +117,7 @@ const breadcrumbs = computed(() => {
 function setSource(key: string) {
   activeSourceKey.value = key
   activePath.value = ''
+  directoryPassword.value = ''
   keyword.value = ''
   searchMode.value = 'current'
   globalResults.value = []
@@ -142,7 +145,23 @@ async function loadFiles() {
     files.value = await api<FileEntry[]>(`/api/files?${params.toString()}`)
   }
   else {
-    files.value = await api<FileEntry[]>(`/api/public/storage/${encodeURIComponent(activeSource.value.key)}/files?path=${encodeURIComponent(activePath.value)}`, { skipAuthRedirect: true } as RequestInit)
+    const params = new URLSearchParams({ path: activePath.value })
+    if (directoryPassword.value)
+      params.set('directoryPassword', directoryPassword.value)
+    try {
+      files.value = await api<FileEntry[]>(`/api/public/storage/${encodeURIComponent(activeSource.value.key)}/files?${params.toString()}`, { skipAuthRedirect: true } as RequestInit)
+    }
+    catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('directory password is required'))
+        throw error
+      const { value } = await ElMessageBox.prompt('请输入目录访问密码', '受保护目录', {
+        inputType: 'password',
+        inputPlaceholder: '目录密码',
+      })
+      directoryPassword.value = value
+      const retryParams = new URLSearchParams({ path: activePath.value, directoryPassword: directoryPassword.value })
+      files.value = await api<FileEntry[]>(`/api/public/storage/${encodeURIComponent(activeSource.value.key)}/files?${retryParams.toString()}`, { skipAuthRedirect: true } as RequestInit)
+    }
   }
   selectedFiles.value = []
 }
@@ -211,10 +230,21 @@ function openFolder(file: FileEntry) {
   void loadFiles()
 }
 
-function currentFileUrl(path: string) {
+function operationAllowed(operation: string) {
+  return !disabledOperations.value.has(operation)
+}
+
+function requireOperation(operation: string) {
+  if (operationAllowed(operation))
+    return true
+  ElMessage.warning(`${operation} operation is disabled`)
+  return false
+}
+
+function currentFileUrl(path: string, preview = false) {
   if (isLoggedIn.value)
-    return fileUrl(path, activeSource.value?.key || 'local')
-  return publicFileUrl(activeSource.value?.key || 'local', path)
+    return fileUrl(path, activeSource.value?.key || 'local', preview)
+  return publicFileUrl(activeSource.value?.key || 'local', path, directoryPassword.value, preview)
 }
 
 function openFile(file: FileEntry) {
@@ -222,7 +252,7 @@ function openFile(file: FileEntry) {
     openFolder(file)
     return
   }
-  if (previewType(file) !== 'unsupported') {
+  if (canPreview(file)) {
     void openPreview(file)
     return
   }
@@ -262,10 +292,12 @@ function previewType(file: FileEntry): PreviewKind {
 }
 
 function canPreview(file: FileEntry) {
-  return previewType(file) !== 'unsupported'
+  return operationAllowed('preview') && previewType(file) !== 'unsupported'
 }
 
 async function openPreview(file: FileEntry) {
+  if (!requireOperation('preview'))
+    return
   const kind = previewType(file)
   if (kind === 'unsupported') {
     window.open(currentFileUrl(file.path), '_blank')
@@ -284,7 +316,7 @@ async function openPreview(file: FileEntry) {
       previewText.value = '文本文件超过 2 MB，请下载后查看。'
       return
     }
-    const res = await fetch(currentFileUrl(file.path), { credentials: 'same-origin' })
+    const res = await fetch(currentFileUrl(file.path, true), { credentials: 'same-origin' })
     if (!res.ok)
       throw new Error(await res.text() || res.statusText)
     previewText.value = await res.text()
@@ -303,6 +335,8 @@ function downloadPreview() {
 }
 
 function downloadFile(file: FileEntry) {
+  if (!requireOperation('download'))
+    return
   if (file.type === 'folder') {
     ElMessage.info('文件夹打包下载待接入')
     return
@@ -311,6 +345,8 @@ function downloadFile(file: FileEntry) {
 }
 
 async function uploadFile(event: Event) {
+  if (!requireOperation('upload'))
+    return
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file)
@@ -326,6 +362,8 @@ async function uploadFile(event: Event) {
 }
 
 async function createFolder() {
+  if (!requireOperation('upload'))
+    return
   const { value } = await ElMessageBox.prompt('输入新目录名称', '新建目录', {
     inputPattern: /^[^\\/]+$/,
     inputErrorMessage: '目录名称不能包含斜杠',
@@ -337,6 +375,8 @@ async function createFolder() {
 }
 
 async function createEmptyFile() {
+  if (!requireOperation('upload'))
+    return
   const { value } = await ElMessageBox.prompt('输入文件名称，例如 notes.txt', '新建文件', {
     inputPattern: /^[^\\/]+$/,
     inputErrorMessage: '文件名称不能包含斜杠',
@@ -348,6 +388,8 @@ async function createEmptyFile() {
 }
 
 async function renameFile(file: FileEntry) {
+  if (!requireOperation('rename'))
+    return
   const { value } = await ElMessageBox.prompt('输入新的名称', '重命名', {
     inputValue: file.name,
     inputPattern: /^[^\\/]+$/,
@@ -361,6 +403,8 @@ async function renameFile(file: FileEntry) {
 }
 
 async function moveFile(file: FileEntry) {
+  if (!requireOperation('move'))
+    return
   const { value } = await ElMessageBox.prompt('输入目标路径，例如 docs/readme.md', '移动文件', {
     inputValue: file.path,
   })
@@ -370,6 +414,8 @@ async function moveFile(file: FileEntry) {
 }
 
 async function createShare(file: FileEntry) {
+  if (!requireOperation('share'))
+    return
   if ((activeSource.value?.key || 'local') !== 'local') {
     ElMessage.info('跨存储源分享将在下一项接入')
     return
@@ -386,6 +432,8 @@ async function createShare(file: FileEntry) {
 }
 
 async function createDirectLink(file: FileEntry) {
+  if (!requireOperation('directLinks'))
+    return
   if ((activeSource.value?.key || 'local') !== 'local') {
     ElMessage.info('跨存储源直链将在下一项接入')
     return
@@ -398,6 +446,8 @@ async function createDirectLink(file: FileEntry) {
 }
 
 async function removeFile(file: FileEntry) {
+  if (!requireOperation('delete'))
+    return
   await ElMessageBox.confirm(`确认删除 ${file.name}？`, '删除文件')
   const params = new URLSearchParams({ storageKey: activeSource.value?.key || 'local', path: file.path })
   await api(`/api/files?${params.toString()}`, { method: 'DELETE' })
@@ -406,6 +456,8 @@ async function removeFile(file: FileEntry) {
 }
 
 async function removeSelected() {
+  if (!requireOperation('delete'))
+    return
   if (!selectedFiles.value.length)
     return
   await ElMessageBox.confirm(`确认删除选中的 ${selectedFiles.value.length} 项？`, '批量删除')
@@ -544,7 +596,7 @@ onBeforeUnmount(() => {
             <el-button :icon="Plus" @click="createFolder">
               新建文件夹
             </el-button>
-            <el-button type="primary" :icon="Upload" @click="uploader?.click()">
+            <el-button v-if="operationAllowed('upload')" type="primary" :icon="Upload" @click="uploader?.click()">
               上传文件
             </el-button>
           </template>
@@ -560,7 +612,7 @@ onBeforeUnmount(() => {
           </el-breadcrumb-item>
         </el-breadcrumb>
         <div class="file-search-tools">
-          <el-button v-if="isLoggedIn && selectedCount" type="danger" plain :icon="Delete" @click="removeSelected">
+          <el-button v-if="isLoggedIn && selectedCount && operationAllowed('delete')" type="danger" plain :icon="Delete" @click="removeSelected">
             删除 {{ selectedCount }}
           </el-button>
           <el-segmented
@@ -617,10 +669,10 @@ onBeforeUnmount(() => {
             <template #default="{ row }">
               <div class="bucket-row-actions">
                 <el-button v-if="row.type === 'file' && canPreview(row)" text :icon="View" title="预览" @click="openPreview(row)" />
-                <el-button text :icon="Download" title="下载" @click="downloadFile(row)" />
+                <el-button v-if="operationAllowed('download')" text :icon="Download" title="下载" @click="downloadFile(row)" />
                 <template v-if="isLoggedIn">
-                  <el-button text :icon="Share" title="分享" @click="createShare(row)" />
-                  <el-button text type="danger" :icon="Delete" title="删除" @click="removeFile(row)" />
+                  <el-button v-if="operationAllowed('share')" text :icon="Share" title="分享" @click="createShare(row)" />
+                  <el-button v-if="operationAllowed('delete')" text type="danger" :icon="Delete" title="删除" @click="removeFile(row)" />
                 </template>
               </div>
             </template>
@@ -641,36 +693,36 @@ onBeforeUnmount(() => {
           <button @click="runContextAction(openInNewTab)">
             <el-icon><Document /></el-icon><span>新标签打开</span>
           </button>
-          <button @click="runContextAction(downloadFile)">
+          <button v-if="operationAllowed('download')" @click="runContextAction(downloadFile)">
             <el-icon><Download /></el-icon><span>打包/下载</span>
           </button>
-          <button @click="runContextAction(createShare)">
+          <button v-if="operationAllowed('share')" @click="runContextAction(createShare)">
             <el-icon><Share /></el-icon><span>创建分享</span>
           </button>
-          <button @click="runContextAction(createDirectLink)">
+          <button v-if="operationAllowed('directLinks')" @click="runContextAction(createDirectLink)">
             <el-icon><Link /></el-icon><span>生成直链</span>
           </button>
-          <button @click="runContextAction(renameFile)">
+          <button v-if="operationAllowed('rename')" @click="runContextAction(renameFile)">
             <el-icon><Edit /></el-icon><span>重命名</span>
           </button>
-          <button @click="runContextAction(moveFile)">
+          <button v-if="operationAllowed('move')" @click="runContextAction(moveFile)">
             <el-icon><Link /></el-icon><span>移动</span>
           </button>
           <button @click="runContextAction(copyPath)">
             <el-icon><CopyDocument /></el-icon><span>复制路径</span>
           </button>
-          <button class="danger" @click="runContextAction(removeFile)">
+          <button v-if="operationAllowed('delete')" class="danger" @click="runContextAction(removeFile)">
             <el-icon><Delete /></el-icon><span>删除</span>
           </button>
           <hr>
         </template>
-        <button @click="closeContextMenu(); createFolder()">
+        <button v-if="operationAllowed('upload')" @click="closeContextMenu(); createFolder()">
           <el-icon><Plus /></el-icon><span>新建文件夹</span>
         </button>
-        <button @click="closeContextMenu(); createEmptyFile()">
+        <button v-if="operationAllowed('upload')" @click="closeContextMenu(); createEmptyFile()">
           <el-icon><Document /></el-icon><span>新建文件</span>
         </button>
-        <button @click="closeContextMenu(); uploader?.click()">
+        <button v-if="operationAllowed('upload')" @click="closeContextMenu(); uploader?.click()">
           <el-icon><Upload /></el-icon><span>上传文件</span>
         </button>
         <button @click="closeContextMenu(); loadAll()">
@@ -733,10 +785,10 @@ onBeforeUnmount(() => {
 
     <el-dialog v-model="previewVisible" class="preview-dialog" :title="previewFile?.name || '文件预览'" width="min(92vw, 960px)" destroy-on-close>
       <div v-if="previewFile" class="preview-body" v-loading="previewLoading">
-        <img v-if="previewKind === 'image'" class="preview-image" :src="currentFileUrl(previewFile.path)" :alt="previewFile.name">
-        <video v-else-if="previewKind === 'video'" class="preview-media" :src="currentFileUrl(previewFile.path)" controls />
-        <audio v-else-if="previewKind === 'audio'" class="preview-audio" :src="currentFileUrl(previewFile.path)" controls />
-        <iframe v-else-if="previewKind === 'pdf'" class="preview-frame" :src="currentFileUrl(previewFile.path)" />
+        <img v-if="previewKind === 'image'" class="preview-image" :src="currentFileUrl(previewFile.path, true)" :alt="previewFile.name">
+        <video v-else-if="previewKind === 'video'" class="preview-media" :src="currentFileUrl(previewFile.path, true)" controls />
+        <audio v-else-if="previewKind === 'audio'" class="preview-audio" :src="currentFileUrl(previewFile.path, true)" controls />
+        <iframe v-else-if="previewKind === 'pdf'" class="preview-frame" :src="currentFileUrl(previewFile.path, true)" />
         <pre v-else-if="previewKind === 'text'" class="preview-text">{{ previewText }}</pre>
         <el-empty v-else description="暂不支持预览此文件类型" />
       </div>

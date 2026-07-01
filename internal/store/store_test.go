@@ -1,6 +1,7 @@
 package store
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -525,19 +526,64 @@ func TestManageUsers(t *testing.T) {
 		t.Fatalf("create admin: %v", err)
 	}
 
-	user, err := s.CreateUser("operator", "password123", "admin")
+	user, err := s.CreateUserWithPolicy("operator", "password123", "admin", []string{"local"}, map[string][]string{"local": []string{"docs/team-a"}}, []string{"delete", "share"})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	if user.Username != "operator" || user.Role != "admin" {
 		t.Fatalf("unexpected user: %#v", user)
 	}
-	updated, err := s.UpdateUser(user.ID, "ops", "newpass123", "super_admin")
+	if len(user.StorageSourceKeys) != 1 || user.StorageSourceKeys[0] != "local" {
+		t.Fatalf("unexpected storage assignments: %#v", user.StorageSourceKeys)
+	}
+	if roots := user.StorageSourceRoots["local"]; len(roots) != 1 || roots[0] != "docs/team-a" {
+		t.Fatalf("unexpected storage roots: %#v", user.StorageSourceRoots)
+	}
+	if len(user.DisabledOperations) != 2 || user.DisabledOperations[0] != "delete" || user.DisabledOperations[1] != "share" {
+		t.Fatalf("unexpected disabled operations: %#v", user.DisabledOperations)
+	}
+	if !s.UserCanAccessStorageSource(user, "local") || s.UserCanAccessStorageSource(user, "s3") {
+		t.Fatalf("unexpected storage access for user: %#v", user)
+	}
+	if !s.UserCanListStoragePath(user, "local", "") || !s.UserCanListStoragePath(user, "local", "docs") {
+		t.Fatal("expected user to list ancestors of assigned root")
+	}
+	if !s.UserCanAccessStoragePath(user, "local", "docs/team-a/report.txt") {
+		t.Fatal("expected user to access assigned root child")
+	}
+	if s.UserCanAccessStoragePath(user, "local", "docs/team-b/report.txt") {
+		t.Fatal("expected user to be blocked outside assigned root")
+	}
+	filtered := s.FilterStorageFilesForUser(user, "local", []domain.FileEntry{
+		{Name: "docs", Path: "docs", Type: "folder"},
+		{Name: "tmp", Path: "tmp", Type: "folder"},
+	}, true)
+	if len(filtered) != 1 || filtered[0].Path != "docs" {
+		t.Fatalf("unexpected ancestor filtered list: %#v", filtered)
+	}
+	searchFiltered := s.FilterStorageFilesForUser(user, "local", []domain.FileEntry{
+		{Name: "a.txt", Path: "docs/team-a/a.txt", Type: "file"},
+		{Name: "b.txt", Path: "docs/team-b/b.txt", Type: "file"},
+	}, false)
+	if len(searchFiltered) != 1 || searchFiltered[0].Path != "docs/team-a/a.txt" {
+		t.Fatalf("unexpected search filtered list: %#v", searchFiltered)
+	}
+	assignedSources, err := s.StorageSourcesForUser(user)
+	if err != nil {
+		t.Fatalf("storage sources for user: %v", err)
+	}
+	if len(assignedSources) != 1 || assignedSources[0].Key != "local" {
+		t.Fatalf("unexpected assigned sources: %#v", assignedSources)
+	}
+	updated, err := s.UpdateUserWithPolicy(user.ID, "ops", "newpass123", "super_admin", nil, nil, []string{"download"})
 	if err != nil {
 		t.Fatalf("update user: %v", err)
 	}
 	if updated.Username != "ops" || updated.Role != "super_admin" {
 		t.Fatalf("unexpected updated user: %#v", updated)
+	}
+	if len(updated.DisabledOperations) != 1 || updated.DisabledOperations[0] != "download" {
+		t.Fatalf("unexpected updated disabled operations: %#v", updated.DisabledOperations)
 	}
 	if _, err := s.AuthenticateUser("ops", "newpass123"); err != nil {
 		t.Fatalf("authenticate updated user: %v", err)
@@ -745,6 +791,75 @@ func TestPrivatePathRules(t *testing.T) {
 	}
 	if _, err := s.ShareDetail(parentShare.Token, "", "private"); err == nil {
 		t.Fatal("expected private child browsing to fail")
+	}
+}
+
+func TestApplyFileListRules(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SaveSettings(map[string]string{"privatePathList": "secret"}); err != nil {
+		t.Fatalf("save private path rules: %v", err)
+	}
+	files := []domain.FileEntry{
+		{Name: "readme.txt", Path: "public/readme.txt", Type: "file"},
+		{Name: "hidden.txt", Path: "source-hidden/hidden.txt", Type: "file"},
+		{Name: "blocked.txt", Path: "source-blocked/blocked.txt", Type: "file"},
+		{Name: "secret.txt", Path: "secret/secret.txt", Type: "file"},
+	}
+	source := domain.StorageSource{ID: 1, HiddenPaths: "source-hidden", BlockedPaths: "source-blocked"}
+
+	adminFiles := s.applyFileListRules(fileListRuleContext{Source: source}, append([]domain.FileEntry(nil), files...))
+	if len(adminFiles) != len(files) {
+		t.Fatalf("admin files were filtered: %#v", adminFiles)
+	}
+	publicFiles := s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: true}, append([]domain.FileEntry(nil), files...))
+	if len(publicFiles) != 1 || publicFiles[0].Path != "public/readme.txt" {
+		t.Fatalf("unexpected public files: %#v", publicFiles)
+	}
+}
+
+func TestDirectoryPasswordRules(t *testing.T) {
+	s := newTestStore(t)
+	vault, err := s.FilePath("vault/private")
+	if err != nil {
+		t.Fatalf("vault path: %v", err)
+	}
+	if err := os.MkdirAll(vault, 0o755); err != nil {
+		t.Fatalf("mkdir vault: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(vault, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	if err := s.SaveSettings(map[string]string{"directoryPasswordRules": "vault = open\nvault/private = deeper"}); err != nil {
+		t.Fatalf("save directory password rules: %v", err)
+	}
+
+	rootFiles, err := s.ListSourceFilesWithPassword("local", "", true, "")
+	if err != nil {
+		t.Fatalf("list root: %v", err)
+	}
+	if len(rootFiles) != 1 || rootFiles[0].Path != "vault" {
+		t.Fatalf("unexpected root files: %#v", rootFiles)
+	}
+	if _, err := s.ListSourceFilesWithPassword("local", "vault", true, "wrong"); err == nil {
+		t.Fatal("expected wrong password to block protected directory")
+	}
+	if _, err := s.ListSourceFilesWithPassword("local", "vault", true, "open"); err != nil {
+		t.Fatalf("expected parent password to open protected directory: %v", err)
+	}
+	if _, err := s.SourceDownloadWithPassword("local", "vault/private/secret.txt", true, "open"); err == nil {
+		t.Fatal("expected more specific directory password to win")
+	}
+	download, err := s.SourceDownloadWithPassword("local", "vault/private/secret.txt", true, "deeper")
+	if err != nil {
+		t.Fatalf("download with password: %v", err)
+	}
+	defer download.Reader.Close()
+	body, err := io.ReadAll(download.Reader)
+	if err != nil {
+		t.Fatalf("read download: %v", err)
+	}
+	if string(body) != "secret" {
+		t.Fatalf("unexpected download body: %q", string(body))
 	}
 }
 

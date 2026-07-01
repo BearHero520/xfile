@@ -190,6 +190,8 @@ func (s *Store) Settings() (map[string]string, error) {
 		"ipAllowList":             "",
 		"ipDenyList":              "",
 		"privatePathList":         "",
+		"directoryPasswordRules":  "",
+		"disabledOperations":      "",
 		"refererProtection":       "disabled",
 		"refererAllowList":        "",
 		"downloadLimitPerMinute":  "0",
@@ -254,19 +256,40 @@ func (s *Store) AuthenticateUser(username, password string) (domain.User, error)
 	username = strings.TrimSpace(username)
 	var user domain.User
 	var passwordHash string
-	err := s.db.QueryRow(`SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?`, username).
-		Scan(&user.ID, &user.Username, &passwordHash, &user.Role, &user.CreatedAt)
+	var disabledOperations string
+	err := s.db.QueryRow(`SELECT id, username, password_hash, role, COALESCE(disabled_operations, ''), created_at FROM users WHERE username = ?`, username).
+		Scan(&user.ID, &user.Username, &passwordHash, &user.Role, &disabledOperations, &user.CreatedAt)
 	if err != nil {
 		return domain.User{}, errors.New("invalid username or password")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
 		return domain.User{}, errors.New("invalid username or password")
 	}
+	if err := s.loadUserStorageSourceKeys(&user); err != nil {
+		return domain.User{}, err
+	}
+	user.DisabledOperations = splitOperationRules(disabledOperations)
+	return user, nil
+}
+
+func (s *Store) UserByUsername(username string) (domain.User, error) {
+	username = strings.TrimSpace(username)
+	var user domain.User
+	var disabledOperations string
+	err := s.db.QueryRow(`SELECT id, username, role, COALESCE(disabled_operations, ''), created_at FROM users WHERE username = ?`, username).
+		Scan(&user.ID, &user.Username, &user.Role, &disabledOperations, &user.CreatedAt)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if err := s.loadUserStorageSourceKeys(&user); err != nil {
+		return domain.User{}, err
+	}
+	user.DisabledOperations = splitOperationRules(disabledOperations)
 	return user, nil
 }
 
 func (s *Store) Users() ([]domain.User, error) {
-	rows, err := s.db.Query(`SELECT id, username, role, created_at FROM users ORDER BY id ASC`)
+	rows, err := s.db.Query(`SELECT id, username, role, COALESCE(disabled_operations, ''), created_at FROM users ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +298,12 @@ func (s *Store) Users() ([]domain.User, error) {
 	users := make([]domain.User, 0)
 	for rows.Next() {
 		var user domain.User
-		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &user.CreatedAt); err != nil {
+		var disabledOperations string
+		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &disabledOperations, &user.CreatedAt); err != nil {
+			return nil, err
+		}
+		user.DisabledOperations = splitOperationRules(disabledOperations)
+		if err := s.loadUserStorageSourceKeys(&user); err != nil {
 			return nil, err
 		}
 		users = append(users, user)
@@ -284,6 +312,18 @@ func (s *Store) Users() ([]domain.User, error) {
 }
 
 func (s *Store) CreateUser(username, password, role string) (domain.User, error) {
+	return s.CreateUserWithStorageSources(username, password, role, nil)
+}
+
+func (s *Store) CreateUserWithStorageSources(username, password, role string, storageSourceKeys []string) (domain.User, error) {
+	return s.CreateUserWithStorageAccess(username, password, role, storageSourceKeys, nil)
+}
+
+func (s *Store) CreateUserWithStorageAccess(username, password, role string, storageSourceKeys []string, storageSourceRoots map[string][]string) (domain.User, error) {
+	return s.CreateUserWithPolicy(username, password, role, storageSourceKeys, storageSourceRoots, nil)
+}
+
+func (s *Store) CreateUserWithPolicy(username, password, role string, storageSourceKeys []string, storageSourceRoots map[string][]string, disabledOperations []string) (domain.User, error) {
 	username = strings.TrimSpace(username)
 	role = normalizeUserRole(role)
 	if username == "" {
@@ -296,15 +336,34 @@ func (s *Store) CreateUser(username, password, role string) (domain.User, error)
 	if err != nil {
 		return domain.User{}, err
 	}
-	res, err := s.db.Exec(`INSERT INTO users(username, password_hash, role) VALUES(?, ?, ?)`, username, string(hash), role)
+	disabledOperationText, err := normalizeOperationRules(disabledOperations)
+	if err != nil {
+		return domain.User{}, err
+	}
+	res, err := s.db.Exec(`INSERT INTO users(username, password_hash, role, disabled_operations) VALUES(?, ?, ?, ?)`, username, string(hash), role, disabledOperationText)
 	if err != nil {
 		return domain.User{}, err
 	}
 	id, _ := res.LastInsertId()
-	return domain.User{ID: id, Username: username, Role: role, CreatedAt: time.Now().Format(time.RFC3339)}, nil
+	if err := s.setUserStorageSources(id, storageSourceKeys, storageSourceRoots); err != nil {
+		return domain.User{}, err
+	}
+	return s.userByID(id)
 }
 
 func (s *Store) UpdateUser(id int64, username, password, role string) (domain.User, error) {
+	return s.UpdateUserWithStorageSources(id, username, password, role, nil)
+}
+
+func (s *Store) UpdateUserWithStorageSources(id int64, username, password, role string, storageSourceKeys []string) (domain.User, error) {
+	return s.UpdateUserWithStorageAccess(id, username, password, role, storageSourceKeys, nil)
+}
+
+func (s *Store) UpdateUserWithStorageAccess(id int64, username, password, role string, storageSourceKeys []string, storageSourceRoots map[string][]string) (domain.User, error) {
+	return s.UpdateUserWithPolicy(id, username, password, role, storageSourceKeys, storageSourceRoots, nil)
+}
+
+func (s *Store) UpdateUserWithPolicy(id int64, username, password, role string, storageSourceKeys []string, storageSourceRoots map[string][]string, disabledOperations []string) (domain.User, error) {
 	username = strings.TrimSpace(username)
 	role = normalizeUserRole(role)
 	if id < 1 {
@@ -316,9 +375,13 @@ func (s *Store) UpdateUser(id int64, username, password, role string) (domain.Us
 	if strings.TrimSpace(password) != "" && len(password) < 8 {
 		return domain.User{}, errors.New("password must be at least 8 characters")
 	}
+	disabledOperationText, err := normalizeOperationRules(disabledOperations)
+	if err != nil {
+		return domain.User{}, err
+	}
 
 	if strings.TrimSpace(password) == "" {
-		if _, err := s.db.Exec(`UPDATE users SET username = ?, role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, role, id); err != nil {
+		if _, err := s.db.Exec(`UPDATE users SET username = ?, role = ?, disabled_operations = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, role, disabledOperationText, id); err != nil {
 			return domain.User{}, err
 		}
 	} else {
@@ -326,14 +389,15 @@ func (s *Store) UpdateUser(id int64, username, password, role string) (domain.Us
 		if err != nil {
 			return domain.User{}, err
 		}
-		if _, err := s.db.Exec(`UPDATE users SET username = ?, password_hash = ?, role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, string(hash), role, id); err != nil {
+		if _, err := s.db.Exec(`UPDATE users SET username = ?, password_hash = ?, role = ?, disabled_operations = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, string(hash), role, disabledOperationText, id); err != nil {
 			return domain.User{}, err
 		}
 	}
 
-	var user domain.User
-	err := s.db.QueryRow(`SELECT id, username, role, created_at FROM users WHERE id = ?`, id).Scan(&user.ID, &user.Username, &user.Role, &user.CreatedAt)
-	return user, err
+	if err := s.setUserStorageSources(id, storageSourceKeys, storageSourceRoots); err != nil {
+		return domain.User{}, err
+	}
+	return s.userByID(id)
 }
 
 func (s *Store) DeleteUser(id int64) error {
@@ -359,6 +423,81 @@ func (s *Store) DeleteUser(id int64) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (s *Store) userByID(id int64) (domain.User, error) {
+	var user domain.User
+	var disabledOperations string
+	err := s.db.QueryRow(`SELECT id, username, role, COALESCE(disabled_operations, ''), created_at FROM users WHERE id = ?`, id).Scan(&user.ID, &user.Username, &user.Role, &disabledOperations, &user.CreatedAt)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if err := s.loadUserStorageSourceKeys(&user); err != nil {
+		return domain.User{}, err
+	}
+	user.DisabledOperations = splitOperationRules(disabledOperations)
+	return user, nil
+}
+
+func (s *Store) loadUserStorageSourceKeys(user *domain.User) error {
+	rows, err := s.db.Query(`SELECT ss.key, uss.root_paths
+		FROM user_storage_sources uss
+		JOIN storage_sources ss ON ss.id = uss.storage_source_id
+		WHERE uss.user_id = ?
+		ORDER BY ss.order_num ASC, ss.id ASC`, user.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	roots := make(map[string][]string)
+	for rows.Next() {
+		var key, rootPaths string
+		if err := rows.Scan(&key, &rootPaths); err != nil {
+			return err
+		}
+		keys = append(keys, key)
+		roots[key] = splitPathRules(rootPaths)
+	}
+	user.StorageSourceKeys = keys
+	user.StorageSourceRoots = roots
+	return rows.Err()
+}
+
+func (s *Store) setUserStorageSources(userID int64, keys []string, roots map[string][]string) error {
+	if userID < 1 {
+		return errors.New("invalid user id")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM user_storage_sources WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	seen := make(map[string]bool)
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		var sourceID int64
+		if err := tx.QueryRow(`SELECT id FROM storage_sources WHERE key = ?`, key).Scan(&sourceID); err != nil {
+			return err
+		}
+		rootPaths, err := normalizeUserStorageRoots(roots[key])
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO user_storage_sources(user_id, storage_source_id, root_paths) VALUES(?, ?, ?)`, userID, sourceID, rootPaths); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SaveSettings(settings map[string]string) error {
@@ -433,6 +572,31 @@ func (s *Store) StorageSources(publicOnly bool) ([]domain.StorageSource, error) 
 	return sources, rows.Err()
 }
 
+func (s *Store) StorageSourcesForUser(user domain.User) ([]domain.StorageSource, error) {
+	if user.Role == "super_admin" {
+		return s.StorageSources(false)
+	}
+	rows, err := s.db.Query(`SELECT ss.id, ss.name, ss.key, ss.type, ss.root_path, ss.hidden_paths, ss.blocked_paths, ss.public, ss.enabled, ss.order_num, ss.created_at
+		FROM storage_sources ss
+		JOIN user_storage_sources uss ON uss.storage_source_id = ss.id
+		WHERE uss.user_id = ? AND ss.enabled = 1
+		ORDER BY ss.order_num ASC, ss.id ASC`, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sources := make([]domain.StorageSource, 0)
+	for rows.Next() {
+		source, err := scanStorageSource(rows)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
 func (s *Store) StorageSource(key string) (domain.StorageSource, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -440,6 +604,88 @@ func (s *Store) StorageSource(key string) (domain.StorageSource, error) {
 	}
 	row := s.db.QueryRow(`SELECT id, name, key, type, root_path, hidden_paths, blocked_paths, public, enabled, order_num, created_at FROM storage_sources WHERE key = ?`, key)
 	return scanStorageSource(row)
+}
+
+func (s *Store) UserCanAccessStorageSource(user domain.User, key string) bool {
+	if user.Role == "super_admin" {
+		return true
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = "local"
+	}
+	for _, allowed := range user.StorageSourceKeys {
+		if allowed == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) UserCanListStoragePath(user domain.User, key, rel string) bool {
+	if user.Role == "super_admin" {
+		return true
+	}
+	if !s.UserCanAccessStorageSource(user, key) {
+		return false
+	}
+	roots := user.StorageSourceRoots[strings.TrimSpace(key)]
+	if len(roots) == 0 {
+		return true
+	}
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return false
+	}
+	if clean == "" {
+		return true
+	}
+	for _, root := range roots {
+		if pathWithinRoot(clean, root) || pathWithinRoot(root, clean) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) UserCanAccessStoragePath(user domain.User, key, rel string) bool {
+	if user.Role == "super_admin" {
+		return true
+	}
+	if !s.UserCanAccessStorageSource(user, key) {
+		return false
+	}
+	roots := user.StorageSourceRoots[strings.TrimSpace(key)]
+	if len(roots) == 0 {
+		return true
+	}
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		if pathWithinRoot(clean, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) FilterStorageFilesForUser(user domain.User, key string, files []domain.FileEntry, includeAncestors bool) []domain.FileEntry {
+	if user.Role == "super_admin" {
+		return files
+	}
+	roots := user.StorageSourceRoots[strings.TrimSpace(key)]
+	if len(roots) == 0 {
+		return files
+	}
+	filtered := files[:0]
+	for _, file := range files {
+		if storagePathAllowedByRoots(file.Path, roots, includeAncestors) {
+			filtered = append(filtered, file)
+		}
+	}
+	return filtered
 }
 
 func (s *Store) CreateStorageSource(input domain.StorageSourceInput) (domain.StorageSource, error) {
@@ -599,6 +845,10 @@ func scanStorageSource(row storageSourceScanner) (domain.StorageSource, error) {
 }
 
 func (s *Store) ListSourceFiles(storageKey, rel string, publicOnly bool) ([]domain.FileEntry, error) {
+	return s.ListSourceFilesWithPassword(storageKey, rel, publicOnly, "")
+}
+
+func (s *Store) ListSourceFilesWithPassword(storageKey, rel string, publicOnly bool, directoryPassword string) ([]domain.FileEntry, error) {
 	source, err := s.availableSource(storageKey, publicOnly)
 	if err != nil {
 		return nil, err
@@ -606,11 +856,22 @@ func (s *Store) ListSourceFiles(storageKey, rel string, publicOnly bool) ([]doma
 	if publicOnly && s.IsSourceBlockedPath(source, rel) {
 		return nil, errors.New("path is blocked")
 	}
+	if publicOnly && !s.DirectoryPasswordAllowed(rel, directoryPassword) {
+		return nil, errors.New("directory password is required")
+	}
 	if objectStorageType(source.Type) {
-		return s.listS3Files(source, rel, publicOnly)
+		files, err := s.listS3Files(source, rel)
+		if err != nil {
+			return nil, err
+		}
+		return s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files), nil
 	}
 	if source.Type == "webdav" {
-		return s.listWebDAVFiles(source, rel, publicOnly)
+		files, err := s.listWebDAVFiles(source, rel)
+		if err != nil {
+			return nil, err
+		}
+		return s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files), nil
 	}
 	_, root, err := s.sourceRoot(storageKey, publicOnly)
 	if err != nil {
@@ -620,10 +881,7 @@ func (s *Store) ListSourceFiles(storageKey, rel string, publicOnly bool) ([]doma
 	if err != nil {
 		return nil, err
 	}
-	if publicOnly {
-		files = s.filterSourcePublicFiles(source, files)
-	}
-	return files, nil
+	return s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files), nil
 }
 
 func (s *Store) SourceFilePath(storageKey, rel string, publicOnly bool) (string, error) {
@@ -641,12 +899,19 @@ func (s *Store) SourceFilePath(storageKey, rel string, publicOnly bool) (string,
 }
 
 func (s *Store) SourceDownload(storageKey, rel string, publicOnly bool) (sourceDownload, error) {
+	return s.SourceDownloadWithPassword(storageKey, rel, publicOnly, "")
+}
+
+func (s *Store) SourceDownloadWithPassword(storageKey, rel string, publicOnly bool, directoryPassword string) (sourceDownload, error) {
 	source, err := s.availableSource(storageKey, publicOnly)
 	if err != nil {
 		return sourceDownload{}, err
 	}
 	if publicOnly && s.IsSourceBlockedPath(source, rel) {
 		return sourceDownload{}, errors.New("path is blocked")
+	}
+	if publicOnly && !s.DirectoryPasswordAllowed(rel, directoryPassword) {
+		return sourceDownload{}, errors.New("directory password is required")
 	}
 	switch source.Type {
 	case "local":
@@ -783,16 +1048,28 @@ func (s *Store) ListSourceFilesForAdmin(storageKey, rel string) ([]domain.FileEn
 		return nil, err
 	}
 	if objectStorageType(source.Type) {
-		return s.listS3Files(source, rel, false)
+		files, err := s.listS3Files(source, rel)
+		if err != nil {
+			return nil, err
+		}
+		return s.applyFileListRules(fileListRuleContext{Source: source}, files), nil
 	}
 	if source.Type == "webdav" {
-		return s.listWebDAVFiles(source, rel, false)
+		files, err := s.listWebDAVFiles(source, rel)
+		if err != nil {
+			return nil, err
+		}
+		return s.applyFileListRules(fileListRuleContext{Source: source}, files), nil
 	}
 	_, root, err := s.sourceRoot(storageKey, false)
 	if err != nil {
 		return nil, err
 	}
-	return s.listFilesInRoot(root, rel)
+	files, err := s.listFilesInRoot(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	return s.applyFileListRules(fileListRuleContext{Source: source}, files), nil
 }
 
 func (s *Store) listFilesInRoot(rootPath, rel string) ([]domain.FileEntry, error) {
@@ -1372,7 +1649,7 @@ func (s *Store) ShareDetail(token string, password string, child string) (domain
 		if err != nil {
 			return domain.ShareDetail{}, err
 		}
-		files = s.filterPublicFiles(files)
+		files = s.applyFileListRules(fileListRuleContext{PublicOnly: true}, files)
 	}
 	return domain.ShareDetail{
 		Token:       share.Token,
@@ -1593,6 +1870,14 @@ func (s *Store) IsPrivatePath(rel string) bool {
 	return pathMatchesRules(rel, s.SettingValue("privatePathList", ""))
 }
 
+func (s *Store) DirectoryPasswordAllowed(rel, password string) bool {
+	rule, ok := matchingDirectoryPasswordRule(rel, s.SettingValue("directoryPasswordRules", ""))
+	if !ok {
+		return true
+	}
+	return verifySharePassword(hashSharePassword(rule.Password), password)
+}
+
 func (s *Store) IsSourceHiddenPath(source domain.StorageSource, rel string) bool {
 	return s.IsPrivatePath(rel) || pathMatchesRules(rel, source.HiddenPaths)
 }
@@ -1601,24 +1886,43 @@ func (s *Store) IsSourceBlockedPath(source domain.StorageSource, rel string) boo
 	return s.IsPrivatePath(rel) || pathMatchesRules(rel, source.BlockedPaths)
 }
 
-func (s *Store) filterPublicFiles(files []domain.FileEntry) []domain.FileEntry {
-	publicFiles := files[:0]
-	for _, file := range files {
-		if !s.IsPrivatePath(file.Path) {
-			publicFiles = append(publicFiles, file)
-		}
-	}
-	return publicFiles
+type fileListRuleContext struct {
+	Source     domain.StorageSource
+	PublicOnly bool
 }
 
-func (s *Store) filterSourcePublicFiles(source domain.StorageSource, files []domain.FileEntry) []domain.FileEntry {
-	publicFiles := files[:0]
-	for _, file := range files {
-		if !s.IsSourceHiddenPath(source, file.Path) && !s.IsSourceBlockedPath(source, file.Path) {
-			publicFiles = append(publicFiles, file)
-		}
+func (s *Store) applyFileListRules(ctx fileListRuleContext, files []domain.FileEntry) []domain.FileEntry {
+	if !ctx.PublicOnly {
+		return files
 	}
-	return publicFiles
+	filtered := files[:0]
+	for _, file := range files {
+		if s.fileHiddenByRules(ctx, file.Path) || s.fileBlockedByRules(ctx, file.Path) {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
+func (s *Store) fileHiddenByRules(ctx fileListRuleContext, rel string) bool {
+	if s.IsPrivatePath(rel) {
+		return true
+	}
+	if ctx.Source.ID == 0 {
+		return false
+	}
+	return pathMatchesRules(rel, ctx.Source.HiddenPaths)
+}
+
+func (s *Store) fileBlockedByRules(ctx fileListRuleContext, rel string) bool {
+	if s.IsPrivatePath(rel) {
+		return true
+	}
+	if ctx.Source.ID == 0 {
+		return false
+	}
+	return pathMatchesRules(rel, ctx.Source.BlockedPaths)
 }
 
 func accessLogFilters(action, path, ip, userAgent, startTime, endTime string) (string, []any) {
@@ -1683,6 +1987,150 @@ func splitPathRules(value string) []string {
 		}
 	}
 	return rules
+}
+
+type directoryPasswordRule struct {
+	Path     string
+	Password string
+}
+
+func matchingDirectoryPasswordRule(rel, rulesText string) (directoryPasswordRule, bool) {
+	path, err := cleanRelative(rel)
+	if err != nil {
+		return directoryPasswordRule{}, false
+	}
+	var matched directoryPasswordRule
+	for _, rule := range splitDirectoryPasswordRules(rulesText) {
+		if rule.Path == path || strings.HasPrefix(path, rule.Path+"/") {
+			if len(rule.Path) > len(matched.Path) {
+				matched = rule
+			}
+		}
+	}
+	return matched, matched.Path != ""
+}
+
+func splitDirectoryPasswordRules(value string) []directoryPasswordRule {
+	lines := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+	rules := make([]directoryPasswordRule, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pathText, password, ok := strings.Cut(line, "=")
+		if !ok {
+			pathText, password, ok = strings.Cut(line, ":")
+		}
+		if !ok {
+			continue
+		}
+		pathText = strings.TrimSpace(pathText)
+		password = strings.TrimSpace(password)
+		if pathText == "" || password == "" {
+			continue
+		}
+		path, err := cleanRelative(pathText)
+		if err != nil || path == "" {
+			continue
+		}
+		rules = append(rules, directoryPasswordRule{Path: path, Password: password})
+	}
+	return rules
+}
+
+func normalizeUserStorageRoots(paths []string) (string, error) {
+	if len(paths) == 0 {
+		return "", nil
+	}
+	seen := make(map[string]bool)
+	normalized := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		clean, err := cleanRelative(path)
+		if err != nil {
+			return "", err
+		}
+		if clean == "" || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		normalized = append(normalized, clean)
+	}
+	return strings.Join(normalized, "\n"), nil
+}
+
+func storagePathAllowedByRoots(rel string, roots []string, includeAncestors bool) bool {
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		if pathWithinRoot(clean, root) || (includeAncestors && pathWithinRoot(root, clean)) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathWithinRoot(rel, root string) bool {
+	rel, relErr := cleanRelative(rel)
+	root, rootErr := cleanRelative(root)
+	if relErr != nil || rootErr != nil {
+		return false
+	}
+	return root == "" || rel == root || strings.HasPrefix(rel, root+"/")
+}
+
+var validOperationRules = map[string]bool{
+	"preview":     true,
+	"download":    true,
+	"upload":      true,
+	"rename":      true,
+	"move":        true,
+	"copy":        true,
+	"delete":      true,
+	"share":       true,
+	"directLinks": true,
+}
+
+func splitOperationRules(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	rules := make([]string, 0, len(fields))
+	for _, field := range fields {
+		rule := strings.TrimSpace(field)
+		if validOperationRules[rule] {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+func normalizeOperationRules(rules []string) (string, error) {
+	if len(rules) == 0 {
+		return "", nil
+	}
+	seen := make(map[string]bool)
+	normalized := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		rule = strings.TrimSpace(rule)
+		if rule == "" || seen[rule] {
+			continue
+		}
+		if !validOperationRules[rule] {
+			return "", errors.New("operation permission rule is invalid")
+		}
+		seen[rule] = true
+		normalized = append(normalized, rule)
+	}
+	return strings.Join(normalized, ","), nil
 }
 
 func normalizePathRulesText(value string) string {
@@ -1948,7 +2396,7 @@ func pathBase(path string) string {
 	return parts[len(parts)-1]
 }
 
-func (s *Store) listS3Files(source domain.StorageSource, rel string, publicOnly bool) ([]domain.FileEntry, error) {
+func (s *Store) listS3Files(source domain.StorageSource, rel string) ([]domain.FileEntry, error) {
 	client, cfg, err := s.s3Client(source)
 	if err != nil {
 		return nil, err
@@ -1969,9 +2417,7 @@ func (s *Store) listS3Files(source domain.StorageSource, rel string, publicOnly 
 		if entry.Path == "" {
 			continue
 		}
-		if !publicOnly || (!s.IsSourceHiddenPath(source, entry.Path) && !s.IsSourceBlockedPath(source, entry.Path)) {
-			files = append(files, entry)
-		}
+		files = append(files, entry)
 	}
 	return files, nil
 }
@@ -2359,7 +2805,7 @@ func webDAVRelFromHref(cfg webDAVSourceConfig, href string) string {
 	return strings.Trim(pathText, "/")
 }
 
-func (s *Store) listWebDAVFiles(source domain.StorageSource, rel string, publicOnly bool) ([]domain.FileEntry, error) {
+func (s *Store) listWebDAVFiles(source domain.StorageSource, rel string) ([]domain.FileEntry, error) {
 	body := `<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>`
 	res, err := s.webDAVRequest(source, "PROPFIND", rel, strings.NewReader(body), map[string]string{
 		"Depth":        "1",
@@ -2391,9 +2837,7 @@ func (s *Store) listWebDAVFiles(source domain.StorageSource, rel string, publicO
 		if !ok || entry.Path == current {
 			continue
 		}
-		if !publicOnly || (!s.IsSourceHiddenPath(source, entry.Path) && !s.IsSourceBlockedPath(source, entry.Path)) {
-			files = append(files, entry)
-		}
+		files = append(files, entry)
 	}
 	return files, nil
 }

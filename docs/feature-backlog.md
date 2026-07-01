@@ -16,15 +16,15 @@ This file tracks remaining file-service features while keeping XFile's own UI st
 
 - [x] Add per-storage hidden path rules.
 - [x] Add per-storage blocked path rules.
-- [ ] Add directory password rules.
-- [ ] Add operation permissions for preview, download, upload, rename, move, copy, delete, share, and direct links.
-- [ ] Apply rules through a single file-list processing pipeline.
+- [x] Add directory password rules.
+- [x] Add operation permissions for preview, download, upload, rename, move, copy, delete, share, and direct links.
+- [x] Apply rules through a single file-list processing pipeline.
 
 ## Phase 3 - Users And Roles
 
-- [ ] Assign users to storage sources.
-- [ ] Assign users to root paths within a storage source.
-- [ ] Add per-user operation permissions.
+- [x] Assign users to storage sources.
+- [x] Assign users to root paths within a storage source.
+- [x] Add per-user operation permissions.
 - [ ] Add user enable / disable status.
 - [ ] Add clearer admin versus normal user behavior.
 

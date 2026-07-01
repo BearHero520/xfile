@@ -86,6 +86,9 @@ export interface UserEntry {
   id: number
   username: string
   role: string
+  storageSourceKeys?: string[]
+  storageSourceRoots?: Record<string, string[]>
+  disabledOperations?: string[]
   createdAt: string
 }
 
@@ -121,15 +124,22 @@ export async function api<T>(url: string, options: ApiOptions = {}): Promise<T> 
   return res.json() as Promise<T>
 }
 
-export function fileUrl(path: string, storageKey = 'local') {
+export function fileUrl(path: string, storageKey = 'local', preview = false) {
   const params = new URLSearchParams({ path })
   if (storageKey)
     params.set('storageKey', storageKey)
+  if (preview)
+    params.set('preview', 'true')
   return `/api/files/download?${params.toString()}`
 }
 
-export function publicFileUrl(storageKey: string, path: string) {
-  return `/api/public/storage/${encodeURIComponent(storageKey)}/download?path=${encodeURIComponent(path)}`
+export function publicFileUrl(storageKey: string, path: string, directoryPassword = '', preview = false) {
+  const params = new URLSearchParams({ path })
+  if (directoryPassword)
+    params.set('directoryPassword', directoryPassword)
+  if (preview)
+    params.set('preview', 'true')
+  return `/api/public/storage/${encodeURIComponent(storageKey)}/download?${params.toString()}`
 }
 
 export function shareDownloadUrl(token: string, password: string, path = '') {

@@ -75,6 +75,14 @@ func Migrate(db *sql.DB) error {
 			user_agent TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS user_storage_sources (
+			user_id INTEGER NOT NULL,
+			storage_source_id INTEGER NOT NULL,
+			root_paths TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY(user_id, storage_source_id),
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+			FOREIGN KEY(storage_source_id) REFERENCES storage_sources(id) ON DELETE CASCADE
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_access_logs_created_at ON access_logs(created_at DESC)`,
 	}
 	for _, statement := range statements {
@@ -110,6 +118,12 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, "storage_sources", "public", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "user_storage_sources", "root_paths", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "users", "disabled_operations", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	return nil

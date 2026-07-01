@@ -10,9 +10,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"xfile/internal/domain"
 )
 
 const sessionCookieName = "xfile_session"
@@ -127,6 +130,66 @@ func (s *Server) private(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) isAuthenticated(r *http.Request) bool {
 	_, ok := s.sessionUsername(r)
 	return ok
+}
+
+func (s *Server) currentUser(r *http.Request) (domain.User, error) {
+	username, ok := s.sessionUsername(r)
+	if !ok {
+		return domain.User{}, errors.New("authentication required")
+	}
+	return s.store.UserByUsername(username)
+}
+
+func (s *Server) requireStorageAccess(w http.ResponseWriter, r *http.Request, storageKey string) bool {
+	return s.requireStorageListAccess(w, r, storageKey, "")
+}
+
+func (s *Server) requireStorageListAccess(w http.ResponseWriter, r *http.Request, storageKey, rel string) bool {
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return false
+	}
+	storageKey = storageKeyOrDefault(storageKey)
+	if s.store.UserCanListStoragePath(user, storageKey, rel) {
+		return true
+	}
+	_ = s.store.LogAccess("storage-access-blocked", storageKey+":"+rel, clientIP(r), r.UserAgent())
+	writeError(w, http.StatusForbidden, errors.New("storage path is not assigned to user"))
+	return false
+}
+
+func (s *Server) requireStoragePathAccess(w http.ResponseWriter, r *http.Request, storageKey string, paths ...string) bool {
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return false
+	}
+	storageKey = storageKeyOrDefault(storageKey)
+	for _, path := range paths {
+		if !s.store.UserCanAccessStoragePath(user, storageKey, path) {
+			_ = s.store.LogAccess("storage-access-blocked", storageKey+":"+path, clientIP(r), r.UserAgent())
+			writeError(w, http.StatusForbidden, errors.New("storage path is not assigned to user"))
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) filterStorageFilesForUser(r *http.Request, storageKey string, files []domain.FileEntry, includeAncestors bool) []domain.FileEntry {
+	user, err := s.currentUser(r)
+	if err != nil {
+		return files
+	}
+	return s.store.FilterStorageFilesForUser(user, storageKeyOrDefault(storageKey), files, includeAncestors)
+}
+
+func requestTargetPath(parts ...string) string {
+	joined := filepath.ToSlash(filepath.Join(parts...))
+	if joined == "." {
+		return ""
+	}
+	return strings.TrimPrefix(joined, "/")
 }
 
 func (s *Server) sessionUsername(r *http.Request) (string, bool) {

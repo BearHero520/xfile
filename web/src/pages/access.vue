@@ -5,10 +5,23 @@ import { api } from '~/api'
 
 const loading = ref(false)
 const saving = ref(false)
+const operationOptions = [
+  { label: 'Preview', value: 'preview' },
+  { label: 'Download', value: 'download' },
+  { label: 'Upload / create', value: 'upload' },
+  { label: 'Rename', value: 'rename' },
+  { label: 'Move', value: 'move' },
+  { label: 'Copy', value: 'copy' },
+  { label: 'Delete', value: 'delete' },
+  { label: 'Share', value: 'share' },
+  { label: 'Direct links', value: 'directLinks' },
+]
 const form = reactive({
   ipAllowList: '',
   ipDenyList: '',
   privatePathList: '',
+  directoryPasswordRules: '',
+  disabledOperations: [] as string[],
   refererProtection: 'disabled',
   refererAllowList: '',
   downloadLimitPerMinute: '0',
@@ -21,6 +34,8 @@ async function loadSettings() {
     form.ipAllowList = settings.ipAllowList || ''
     form.ipDenyList = settings.ipDenyList || ''
     form.privatePathList = settings.privatePathList || ''
+    form.directoryPasswordRules = settings.directoryPasswordRules || ''
+    form.disabledOperations = (settings.disabledOperations || '').split(/[\s,;]+/).filter(Boolean)
     form.refererProtection = settings.refererProtection || 'disabled'
     form.refererAllowList = settings.refererAllowList || ''
     form.downloadLimitPerMinute = settings.downloadLimitPerMinute || '0'
@@ -39,6 +54,8 @@ async function saveRules() {
         ipAllowList: form.ipAllowList,
         ipDenyList: form.ipDenyList,
         privatePathList: form.privatePathList,
+        directoryPasswordRules: form.directoryPasswordRules,
+        disabledOperations: form.disabledOperations.join(','),
         refererProtection: form.refererProtection,
         refererAllowList: form.refererAllowList,
         downloadLimitPerMinute: form.downloadLimitPerMinute,
@@ -69,6 +86,23 @@ onMounted(loadSettings)
       </div>
 
       <el-form class="access-rules-form" label-position="top" :model="form">
+        <el-form-item label="Directory password rules">
+          <el-input
+            v-model="form.directoryPasswordRules"
+            type="textarea"
+            :rows="5"
+            placeholder="One rule per line, format: path=password&#10;docs/private=secret123"
+          />
+        </el-form-item>
+
+        <el-form-item label="Disabled operations">
+          <el-checkbox-group v-model="form.disabledOperations" class="operation-checks">
+            <el-checkbox v-for="operation in operationOptions" :key="operation.value" :label="operation.value">
+              {{ operation.label }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+
         <div class="access-form-grid">
           <el-form-item label="IP 白名单">
             <el-input

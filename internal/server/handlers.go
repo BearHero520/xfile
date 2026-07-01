@@ -27,16 +27,35 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) publicSite(w http.ResponseWriter, r *http.Request) {
-	data, err := s.store.PublicSite(s.isAuthenticated(r))
+	loggedIn := s.isAuthenticated(r)
+	data, err := s.store.PublicSite(loggedIn)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if loggedIn {
+		user, err := s.currentUser(r)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, err)
+			return
+		}
+		sources, err := s.store.StorageSourcesForUser(user)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		data.Sources = sources
 	}
 	writeJSON(w, http.StatusOK, data)
 }
 
 func (s *Server) storageSources(w http.ResponseWriter, r *http.Request) {
-	sources, err := s.store.StorageSources(false)
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	sources, err := s.store.StorageSourcesForUser(user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -96,7 +115,7 @@ func (s *Server) deleteStorageSource(w http.ResponseWriter, r *http.Request) {
 func (s *Server) publicStorageFiles(w http.ResponseWriter, r *http.Request) {
 	storageKey := r.PathValue("key")
 	rel := r.URL.Query().Get("path")
-	files, err := s.store.ListSourceFiles(storageKey, rel, true)
+	files, err := s.store.ListSourceFilesWithPassword(storageKey, rel, true, r.URL.Query().Get("directoryPassword"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -106,9 +125,12 @@ func (s *Server) publicStorageFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) publicStorageDownload(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, downloadOperation(r)) {
+		return
+	}
 	storageKey := r.PathValue("key")
 	rel := r.URL.Query().Get("path")
-	download, err := s.store.SourceDownload(storageKey, rel, true)
+	download, err := s.store.SourceDownloadWithPassword(storageKey, rel, true, r.URL.Query().Get("directoryPassword"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -125,11 +147,15 @@ func (s *Server) publicStorageDownload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	storageKey := storageKeyFromRequest(r)
+	if !s.requireStorageListAccess(w, r, storageKey, path) {
+		return
+	}
 	files, err := s.store.ListSourceFilesForAdmin(storageKey, path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	files = s.filterStorageFilesForUser(r, storageKey, files, true)
 	_ = s.store.LogAccess("list", storageKey+":"+path, clientIP(r), r.UserAgent())
 	writeJSON(w, http.StatusOK, files)
 }
@@ -138,11 +164,15 @@ func (s *Server) searchFiles(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	limit := queryInt(r, "limit", 50)
 	storageKey := storageKeyFromRequest(r)
+	if !s.requireStorageAccess(w, r, storageKey) {
+		return
+	}
 	files, err := s.store.SearchSourceFiles(storageKey, query, limit)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	files = s.filterStorageFilesForUser(r, storageKey, files, false)
 	if strings.TrimSpace(query) != "" {
 		_ = s.store.LogAccess("search", storageKey+":"+query, clientIP(r), r.UserAgent())
 	}
@@ -150,6 +180,9 @@ func (s *Server) searchFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, "upload") {
+		return
+	}
 	if s.store.SettingValue("allowUpload", "enabled") != "enabled" {
 		writeError(w, http.StatusForbidden, os.ErrPermission)
 		return
@@ -173,6 +206,9 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	name := filepath.Base(header.Filename)
+	if !s.requireStoragePathAccess(w, r, storageKey, requestTargetPath(r.FormValue("path"), name)) {
+		return
+	}
 	rel, err := s.store.UploadSourceFile(storageKey, r.FormValue("path"), name, file, header.Size)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -183,6 +219,9 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, "upload") {
+		return
+	}
 	var req struct {
 		StorageKey string `json:"storageKey"`
 		Path       string `json:"path"`
@@ -192,6 +231,9 @@ func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	storageKey := storageKeyOrDefault(req.StorageKey)
+	if !s.requireStoragePathAccess(w, r, storageKey, req.Path) {
+		return
+	}
 	folder, err := s.store.CreateSourceFolder(storageKey, req.Path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -202,6 +244,9 @@ func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createEmptyFile(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, "upload") {
+		return
+	}
 	var req struct {
 		StorageKey string `json:"storageKey"`
 		Path       string `json:"path"`
@@ -211,6 +256,9 @@ func (s *Server) createEmptyFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	storageKey := storageKeyOrDefault(req.StorageKey)
+	if !s.requireStoragePathAccess(w, r, storageKey, req.Path) {
+		return
+	}
 	file, err := s.store.CreateSourceEmptyFile(storageKey, req.Path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -221,8 +269,14 @@ func (s *Server) createEmptyFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, downloadOperation(r)) {
+		return
+	}
 	rel := r.URL.Query().Get("path")
 	storageKey := storageKeyFromRequest(r)
+	if !s.requireStoragePathAccess(w, r, storageKey, rel) {
+		return
+	}
 	download, err := s.store.SourceDownload(storageKey, rel, false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -238,8 +292,14 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, "delete") {
+		return
+	}
 	rel := r.URL.Query().Get("path")
 	storageKey := storageKeyFromRequest(r)
+	if !s.requireStoragePathAccess(w, r, storageKey, rel) {
+		return
+	}
 	if err := s.store.DeleteSourceFile(storageKey, rel); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -258,7 +318,17 @@ func (s *Server) moveFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	operation := "move"
+	if sameDirectory(req.From, req.To) {
+		operation = "rename"
+	}
+	if !s.requireOperation(w, r, operation) {
+		return
+	}
 	storageKey := storageKeyOrDefault(req.StorageKey)
+	if !s.requireStoragePathAccess(w, r, storageKey, req.From, req.To) {
+		return
+	}
 	entry, err := s.store.MoveSourceFile(storageKey, req.From, req.To)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -278,6 +348,9 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, "share") {
+		return
+	}
 	var req struct {
 		Path      string `json:"path"`
 		ExpiresAt string `json:"expiresAt"`
@@ -285,6 +358,9 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !s.requireStoragePathAccess(w, r, "local", req.Path) {
 		return
 	}
 	share, err := s.store.CreateShare(req.Path, req.ExpiresAt, req.Password)
@@ -326,6 +402,9 @@ func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) downloadShare(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, downloadOperation(r)) {
+		return
+	}
 	share, path, err := s.store.SharedFilePath(r.PathValue("token"), r.URL.Query().Get("password"), r.URL.Query().Get("path"))
 	if err != nil {
 		writeError(w, http.StatusForbidden, err)
@@ -344,6 +423,9 @@ func (s *Server) downloadShare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) openShare(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, "download") {
+		return
+	}
 	share, err := s.store.ResolveShare(r.PathValue("token"), r.URL.Query().Get("password"))
 	if err != nil {
 		writeError(w, http.StatusForbidden, err)
@@ -368,11 +450,17 @@ func (s *Server) listDirectLinks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createDirectLink(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, "directLinks") {
+		return
+	}
 	var req struct {
 		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !s.requireStoragePathAccess(w, r, "local", req.Path) {
 		return
 	}
 	link, err := s.store.CreateDirectLink(req.Path)
@@ -417,6 +505,9 @@ func (s *Server) updateDirectLink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) openDirectLink(w http.ResponseWriter, r *http.Request) {
+	if !s.requireOperation(w, r, "download") {
+		return
+	}
 	link, err := s.store.ResolveDirectLink(r.PathValue("token"))
 	if err != nil {
 		http.NotFound(w, r)
@@ -476,15 +567,18 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username           string              `json:"username"`
+		Password           string              `json:"password"`
+		Role               string              `json:"role"`
+		StorageSourceKeys  []string            `json:"storageSourceKeys"`
+		StorageSourceRoots map[string][]string `json:"storageSourceRoots"`
+		DisabledOperations []string            `json:"disabledOperations"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	user, err := s.store.CreateUser(req.Username, req.Password, req.Role)
+	user, err := s.store.CreateUserWithPolicy(req.Username, req.Password, req.Role, req.StorageSourceKeys, req.StorageSourceRoots, req.DisabledOperations)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -500,15 +594,18 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username           string              `json:"username"`
+		Password           string              `json:"password"`
+		Role               string              `json:"role"`
+		StorageSourceKeys  []string            `json:"storageSourceKeys"`
+		StorageSourceRoots map[string][]string `json:"storageSourceRoots"`
+		DisabledOperations []string            `json:"disabledOperations"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	user, err := s.store.UpdateUser(id, req.Username, req.Password, req.Role)
+	user, err := s.store.UpdateUserWithPolicy(id, req.Username, req.Password, req.Role, req.StorageSourceKeys, req.StorageSourceRoots, req.DisabledOperations)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -614,6 +711,18 @@ func storageKeyOrDefault(value string) string {
 		return value
 	}
 	return "local"
+}
+
+func sameDirectory(from, to string) bool {
+	fromDir := filepath.ToSlash(filepath.Dir(strings.TrimSpace(from)))
+	toDir := filepath.ToSlash(filepath.Dir(strings.TrimSpace(to)))
+	if fromDir == "." {
+		fromDir = ""
+	}
+	if toDir == "." {
+		toDir = ""
+	}
+	return fromDir == toDir
 }
 
 func parseRFC3339(value string) time.Time {

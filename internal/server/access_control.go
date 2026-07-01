@@ -82,6 +82,41 @@ func (s *Server) enforceDownloadLimit(w http.ResponseWriter, r *http.Request, pa
 	return false
 }
 
+func (s *Server) operationAllowed(operation string) bool {
+	operation = strings.TrimSpace(operation)
+	if operation == "" {
+		return true
+	}
+	for _, disabled := range splitOperationRules(s.store.SettingValue("disabledOperations", "")) {
+		if disabled == operation {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) requireOperation(w http.ResponseWriter, r *http.Request, operation string) bool {
+	if s.operationAllowed(operation) && s.userOperationAllowed(r, operation) {
+		return true
+	}
+	_ = s.store.LogAccess("operation-blocked", operation+":"+r.URL.Path, clientIP(r), r.UserAgent())
+	writeError(w, http.StatusForbidden, fmt.Errorf("%s operation is disabled", operation))
+	return false
+}
+
+func (s *Server) userOperationAllowed(r *http.Request, operation string) bool {
+	user, err := s.currentUser(r)
+	if err != nil || user.Role == "super_admin" {
+		return true
+	}
+	for _, disabled := range user.DisabledOperations {
+		if disabled == operation {
+			return false
+		}
+	}
+	return true
+}
+
 func (l *downloadRateLimiter) allow(key string, limit int, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -198,6 +233,39 @@ func splitIPRules(value string) []string {
 	return rules
 }
 
+var validOperationRules = map[string]bool{
+	"preview":     true,
+	"download":    true,
+	"upload":      true,
+	"rename":      true,
+	"move":        true,
+	"copy":        true,
+	"delete":      true,
+	"share":       true,
+	"directLinks": true,
+}
+
+func splitOperationRules(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	rules := make([]string, 0, len(fields))
+	for _, field := range fields {
+		rule := strings.TrimSpace(field)
+		if validOperationRules[rule] {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+func downloadOperation(r *http.Request) string {
+	if queryBool(r, "preview", false) {
+		return "preview"
+	}
+	return "download"
+}
+
 func validateAccessSettings(settings map[string]string) error {
 	if value, ok := settings["storageProvider"]; ok {
 		if err := validateStorageProvider(value); err != nil {
@@ -247,6 +315,16 @@ func validateAccessSettings(settings map[string]string) error {
 	}
 	if value, ok := settings["ipDenyList"]; ok {
 		if err := validateIPRuleList(value, "IP 黑名单"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["directoryPasswordRules"]; ok {
+		if err := validateDirectoryPasswordRules(value); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["disabledOperations"]; ok {
+		if err := validateOperationRuleList(value); err != nil {
 			return err
 		}
 	}
@@ -394,6 +472,43 @@ func validatePathRuleList(value, label string) error {
 		clean := strings.TrimPrefix(strings.ReplaceAll(rule, `\`, `/`), "/")
 		if clean == "" || strings.Contains(clean, ":") || strings.HasPrefix(clean, "../") || clean == ".." || strings.Contains(clean, "/../") {
 			return fmt.Errorf("%s包含无效路径：%s", label, rule)
+		}
+	}
+	return nil
+}
+
+func validateDirectoryPasswordRules(value string) error {
+	for _, line := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	}) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pathText, password, ok := strings.Cut(line, "=")
+		if !ok {
+			pathText, password, ok = strings.Cut(line, ":")
+		}
+		if !ok || strings.TrimSpace(pathText) == "" || strings.TrimSpace(password) == "" {
+			return fmt.Errorf("directory password rule is invalid: %s", line)
+		}
+		if err := validatePathRuleList(pathText, "directory password path"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateOperationRuleList(value string) error {
+	for _, rule := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	}) {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			continue
+		}
+		if !validOperationRules[rule] {
+			return fmt.Errorf("operation permission rule is invalid: %s", rule)
 		}
 	}
 	return nil

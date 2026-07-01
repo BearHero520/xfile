@@ -70,10 +70,13 @@ type ShareDetail struct {
 }
 
 type User struct {
-	ID        int64  `json:"id"`
-	Username  string `json:"username"`
-	Role      string `json:"role"`
-	CreatedAt string `json:"createdAt"`
+	ID                 int64               `json:"id"`
+	Username           string              `json:"username"`
+	Role               string              `json:"role"`
+	StorageSourceKeys  []string            `json:"storageSourceKeys,omitempty"`
+	StorageSourceRoots map[string][]string `json:"storageSourceRoots,omitempty"`
+	DisabledOperations []string            `json:"disabledOperations,omitempty"`
+	CreatedAt          string              `json:"createdAt"`
 }
 
 type DirectLink struct {

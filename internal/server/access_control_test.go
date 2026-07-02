@@ -60,7 +60,7 @@ func TestRefererHostAllowed(t *testing.T) {
 }
 
 func TestDownloadRateLimiter(t *testing.T) {
-	limiter := downloadRateLimiter{}
+	limiter := requestRateLimiter{}
 	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
 
 	if !limiter.allow("127.0.0.1", 2, now) {
@@ -79,15 +79,20 @@ func TestDownloadRateLimiter(t *testing.T) {
 
 func TestValidateAccessSettings(t *testing.T) {
 	valid := map[string]string{
-		"ipAllowList":            "127.0.0.1\n10.0.0.0/8",
-		"ipDenyList":             "2001:db8::/32",
-		"refererProtection":      "enabled",
-		"refererAllowList":       "example.com\n*.cdn.example.com\nhttps://static.example.net",
-		"downloadLimitPerMinute": "12",
-		"disabledOperations":     "preview,download,upload,rename,move,copy,delete,share,directLinks",
-		"webdav":                 "enabled",
-		"webdavReadOnly":         "disabled",
-		"webdavMountPath":        "/dav",
+		"ipAllowList":                 "127.0.0.1\n10.0.0.0/8",
+		"ipDenyList":                  "2001:db8::/32",
+		"refererProtection":           "enabled",
+		"refererAllowList":            "example.com\n*.cdn.example.com\nhttps://static.example.net",
+		"downloadLimitPerMinute":      "12",
+		"loginLimitPerMinute":         "5",
+		"sharePasswordLimitPerMinute": "5",
+		"disabledOperations":          "preview,download,upload,rename,move,copy,delete,share,directLinks",
+		"webdav":                      "enabled",
+		"webdavReadOnly":              "disabled",
+		"webdavMountPath":             "/dav",
+		"externalPreviewProvider":     "kkfileview",
+		"externalPreviewBaseUrl":      "https://preview.example.com",
+		"externalPreviewTemplate":     "{server}/onlinePreview?url={base64Url}",
 	}
 	if err := validateAccessSettings(valid); err != nil {
 		t.Fatalf("valid access settings failed: %v", err)
@@ -103,10 +108,20 @@ func TestValidateAccessSettings(t *testing.T) {
 		{name: "invalid referer url", settings: map[string]string{"refererAllowList": "https://"}},
 		{name: "negative download limit", settings: map[string]string{"downloadLimitPerMinute": "-1"}},
 		{name: "text download limit", settings: map[string]string{"downloadLimitPerMinute": "many"}},
+		{name: "negative login limit", settings: map[string]string{"loginLimitPerMinute": "-1"}},
+		{name: "text login limit", settings: map[string]string{"loginLimitPerMinute": "many"}},
+		{name: "negative share password limit", settings: map[string]string{"sharePasswordLimitPerMinute": "-1"}},
+		{name: "text share password limit", settings: map[string]string{"sharePasswordLimitPerMinute": "many"}},
 		{name: "invalid operation", settings: map[string]string{"disabledOperations": "publish"}},
 		{name: "invalid webdav switch", settings: map[string]string{"webdav": "on"}},
 		{name: "invalid webdav readonly switch", settings: map[string]string{"webdavReadOnly": "off"}},
 		{name: "invalid webdav mount path", settings: map[string]string{"webdavMountPath": "dav"}},
+		{name: "invalid external preview provider", settings: map[string]string{"externalPreviewProvider": "office"}},
+		{name: "invalid external preview url", settings: map[string]string{"externalPreviewBaseUrl": "https://"}},
+		{name: "invalid external preview scheme", settings: map[string]string{"externalPreviewBaseUrl": "ftp://preview.example.com"}},
+		{name: "enabled external preview without target", settings: map[string]string{"externalPreviewProvider": "kkfileview"}},
+		{name: "invalid external preview template prefix", settings: map[string]string{"externalPreviewTemplate": "preview?url={encodedUrl}"}},
+		{name: "invalid external preview template placeholder", settings: map[string]string{"externalPreviewTemplate": "{server}/preview"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -31,9 +31,15 @@ const actionOptions = [
   { label: '新建文件夹', value: 'mkdir' },
   { label: '分享访问', value: 'share-view' },
   { label: '分享下载', value: 'share-download' },
+  { label: '分享密码错误', value: 'share-password-failed' },
+  { label: '分享密码限频', value: 'share-password-rate-limited' },
   { label: '直链访问', value: 'direct' },
   { label: 'IP 拦截', value: 'ip-blocked' },
+  { label: 'CSRF 拦截', value: 'csrf-blocked' },
   { label: '下载限频', value: 'download-rate-limited' },
+  { label: '登录限频', value: 'login-rate-limited' },
+  { label: '会话下线', value: 'session-revoke' },
+  { label: '批量下线', value: 'sessions-revoke' },
   { label: '日志清理', value: 'logs-cleanup' },
 ]
 
@@ -141,8 +147,10 @@ function actionLabel(action: string) {
 }
 
 function actionTagType(action: string) {
-  if (['delete', 'ip-blocked', 'download-rate-limited'].includes(action))
+  if (['delete', 'ip-blocked', 'csrf-blocked', 'download-rate-limited', 'login-rate-limited', 'share-password-rate-limited', 'session-revoke', 'sessions-revoke'].includes(action))
     return 'danger'
+  if (['share-password-failed'].includes(action))
+    return 'warning'
   if (['upload', 'mkdir', 'move'].includes(action))
     return 'success'
   if (['share-view', 'share-download', 'direct'].includes(action))
@@ -154,7 +162,7 @@ onMounted(loadLogs)
 </script>
 
 <template>
-  <div class="workspace" v-loading="loading">
+  <div v-loading="loading" class="workspace">
     <section class="panel">
       <div class="panel-heading">
         <div>

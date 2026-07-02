@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
-  DataLine,
   Connection,
+  DataLine,
   Lock,
   Management,
   Operation,
@@ -18,7 +18,7 @@ const loading = ref(false)
 const ruleModules = [
   {
     title: '访问控制',
-    description: '维护 IP 白名单、黑名单、私有路径、Referer 防盗链和下载限频。',
+    description: '维护 IP 白名单、黑名单、私有路径、Referer 防盗链和访问限频。',
     icon: Lock,
     to: '/access',
     status: '已接入',
@@ -74,6 +74,21 @@ const ruleModules = [
   },
 ] as const
 
+const uploadSummary = computed(() => {
+  if (settings.value.allowUpload === 'disabled')
+    return '已关闭'
+  const extCount = countRules(settings.value.uploadAllowExtensions || '') + countRules(settings.value.uploadDenyExtensions || '')
+  return extCount > 0 ? `开启 / ${extCount} 条扩展名` : `开启 / ${settings.value.maxUploadMB || '512'} MB`
+})
+
+const ipRuleSummary = computed(() => {
+  const allowCount = settings.value.ipAllowList?.trim() ? settings.value.ipAllowList.trim().split(/\s+/).length : 0
+  const denyCount = settings.value.ipDenyList?.trim() ? settings.value.ipDenyList.trim().split(/\s+/).length : 0
+  if (!allowCount && !denyCount)
+    return '未配置'
+  return `白 ${allowCount} / 黑 ${denyCount}`
+})
+
 const policySummary = computed(() => [
   {
     label: '上传',
@@ -109,21 +124,6 @@ const policySummary = computed(() => [
   },
 ] as const)
 
-const uploadSummary = computed(() => {
-  if (settings.value.allowUpload === 'disabled')
-    return '已关闭'
-  const extCount = countRules(settings.value.uploadAllowExtensions || '') + countRules(settings.value.uploadDenyExtensions || '')
-  return extCount > 0 ? `开启 / ${extCount} 条扩展名` : `开启 / ${settings.value.maxUploadMB || '512'} MB`
-})
-
-const ipRuleSummary = computed(() => {
-  const allowCount = settings.value.ipAllowList?.trim() ? settings.value.ipAllowList.trim().split(/\s+/).length : 0
-  const denyCount = settings.value.ipDenyList?.trim() ? settings.value.ipDenyList.trim().split(/\s+/).length : 0
-  if (!allowCount && !denyCount)
-    return '未配置'
-  return `白 ${allowCount} / 黑 ${denyCount}`
-})
-
 function countRules(value: string) {
   return value.trim() ? value.trim().split(/[\s,;]+/).filter(Boolean).length : 0
 }
@@ -142,7 +142,7 @@ onMounted(loadSettings)
 </script>
 
 <template>
-  <div class="workspace" v-loading="loading">
+  <div v-loading="loading" class="workspace">
     <section class="overview-band">
       <div>
         <p class="eyebrow">
@@ -205,7 +205,16 @@ onMounted(loadSettings)
           Referer 防盗链
         </el-tag>
         <el-tag type="warning">
+          CSRF 防护
+        </el-tag>
+        <el-tag type="warning">
           下载限频
+        </el-tag>
+        <el-tag type="warning">
+          登录限频
+        </el-tag>
+        <el-tag type="warning">
+          分享密码限频
         </el-tag>
         <el-tag type="success">
           上传扩展名规则

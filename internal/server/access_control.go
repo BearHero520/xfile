@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-type downloadRateLimiter struct {
+type requestRateLimiter struct {
 	mu   sync.Mutex
 	hits map[string][]time.Time
 }
@@ -117,21 +117,11 @@ func (s *Server) userOperationAllowed(r *http.Request, operation string) bool {
 	return true
 }
 
-func (l *downloadRateLimiter) allow(key string, limit int, now time.Time) bool {
+func (l *requestRateLimiter) allow(key string, limit int, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.hits == nil {
-		l.hits = make(map[string][]time.Time)
-	}
-	windowStart := now.Add(-time.Minute)
-	hits := l.hits[key]
-	kept := hits[:0]
-	for _, hit := range hits {
-		if hit.After(windowStart) {
-			kept = append(kept, hit)
-		}
-	}
+	kept := l.prunedLocked(key, now, time.Minute)
 	if len(kept) >= limit {
 		l.hits[key] = kept
 		return false
@@ -139,6 +129,48 @@ func (l *downloadRateLimiter) allow(key string, limit int, now time.Time) bool {
 	kept = append(kept, now)
 	l.hits[key] = kept
 	return true
+}
+
+func (l *requestRateLimiter) tooMany(key string, limit int, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	kept := l.prunedLocked(key, now, time.Minute)
+	l.hits[key] = kept
+	return len(kept) >= limit
+}
+
+func (l *requestRateLimiter) record(key string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	kept := l.prunedLocked(key, now, time.Minute)
+	kept = append(kept, now)
+	l.hits[key] = kept
+}
+
+func (l *requestRateLimiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.hits != nil {
+		delete(l.hits, key)
+	}
+}
+
+func (l *requestRateLimiter) prunedLocked(key string, now time.Time, window time.Duration) []time.Time {
+	if l.hits == nil {
+		l.hits = make(map[string][]time.Time)
+	}
+	windowStart := now.Add(-window)
+	hits := l.hits[key]
+	kept := hits[:0]
+	for _, hit := range hits {
+		if hit.After(windowStart) {
+			kept = append(kept, hit)
+		}
+	}
+	return kept
 }
 
 func refererHostAllowed(refererHost, requestHost, rulesText string) bool {
@@ -345,6 +377,23 @@ func validateAccessSettings(settings map[string]string) error {
 			return errors.New("下载限频必须是大于或等于 0 的整数")
 		}
 	}
+	if value, ok := settings["loginLimitPerMinute"]; ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || limit < 0 {
+			return errors.New("登录限频必须是大于或等于 0 的整数")
+		}
+	}
+	if value, ok := settings["loginCaptcha"]; ok {
+		if err := validateSwitch(value, "登录验证码"); err != nil {
+			return err
+		}
+	}
+	if value, ok := settings["sharePasswordLimitPerMinute"]; ok {
+		limit, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || limit < 0 {
+			return errors.New("分享密码限频必须是大于或等于 0 的整数")
+		}
+	}
 	if value, ok := settings["webdav"]; ok {
 		if err := validateSwitch(value, "WebDAV 开关"); err != nil {
 			return err
@@ -369,6 +418,9 @@ func validateAccessSettings(settings map[string]string) error {
 			return errors.New("WebDAV 挂载路径必须是有效的绝对路径")
 		}
 	}
+	if err := validateExternalPreviewSettings(settings); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -382,6 +434,80 @@ func validateWebDAVMountPath(value string) (string, error) {
 		return "", errors.New("WebDAV 挂载路径必须是有效的绝对路径")
 	}
 	return clean, nil
+}
+
+func validateExternalPreviewSettings(settings map[string]string) error {
+	provider, hasProvider := settings["externalPreviewProvider"]
+	baseURL, hasBaseURL := settings["externalPreviewBaseUrl"]
+	template, hasTemplate := settings["externalPreviewTemplate"]
+	if !hasProvider && !hasBaseURL && !hasTemplate {
+		return nil
+	}
+
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = "disabled"
+	}
+	if err := validateExternalPreviewProvider(provider); err != nil {
+		return err
+	}
+	if err := validateExternalPreviewBaseURL(baseURL); err != nil {
+		return err
+	}
+	if err := validateExternalPreviewTemplate(template); err != nil {
+		return err
+	}
+	if provider != "disabled" && strings.TrimSpace(baseURL) == "" && strings.TrimSpace(template) == "" {
+		return errors.New("外部预览启用时必须配置服务地址或 URL 模板")
+	}
+	return nil
+}
+
+func validateExternalPreviewProvider(value string) error {
+	switch strings.TrimSpace(value) {
+	case "", "disabled", "kkfileview", "onlyoffice":
+		return nil
+	default:
+		return errors.New("外部预览服务只能是 disabled、kkfileview 或 onlyoffice")
+	}
+}
+
+func validateExternalPreviewBaseURL(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if strings.ContainsAny(value, " \r\n\t") {
+		return errors.New("外部预览服务地址必须是有效的 http 或 https URL")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return errors.New("外部预览服务地址必须是有效的 http 或 https URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("外部预览服务地址必须是有效的 http 或 https URL")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("外部预览服务地址不能包含查询参数或片段")
+	}
+	return nil
+}
+
+func validateExternalPreviewTemplate(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if len(value) > 1000 || strings.ContainsAny(value, "\r\n") {
+		return errors.New("外部预览 URL 模板格式无效")
+	}
+	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") && !strings.HasPrefix(value, "/") && !strings.Contains(value, "{server}") {
+		return errors.New("外部预览 URL 模板必须以 http、https、/ 或 {server} 开头")
+	}
+	if !strings.Contains(value, "{url}") && !strings.Contains(value, "{encodedUrl}") && !strings.Contains(value, "{base64Url}") {
+		return errors.New("外部预览 URL 模板必须包含文件 URL 占位符")
+	}
+	return nil
 }
 
 func validateSwitch(value, label string) error {

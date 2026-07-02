@@ -4,6 +4,8 @@ export interface FileEntry {
   type: 'file' | 'folder'
   size: number
   modifiedAt: string
+  description?: string
+  metadataUpdatedAt?: string
 }
 
 export interface StorageSource {
@@ -29,6 +31,17 @@ export interface PublicSite {
   sources: StorageSource[]
 }
 
+export interface AuthMe {
+  initialized: boolean
+  authenticated: boolean
+  captchaRequired?: boolean
+  username: string
+  sessionSeconds: number
+  csrfToken?: string
+  user?: UserEntry
+  session?: SessionEntry
+}
+
 export interface ShareEntry {
   id: number
   token: string
@@ -49,6 +62,7 @@ export interface ShareDetail {
   name: string
   type: 'file' | 'folder'
   size: number
+  description?: string
   protected: boolean
   expiresAt?: string
   createdAt: string
@@ -82,14 +96,41 @@ export interface AccessLogPage {
   pageSize: number
 }
 
+export interface PathMetric {
+  path: string
+  count: number
+  lastAccessAt?: string
+}
+
+export interface LinkAnalytics {
+  shareVisits: AccessLog[]
+  downloadRanking: PathMetric[]
+  directLinkAccesses: AccessLog[]
+}
+
 export interface UserEntry {
   id: number
   username: string
   role: string
+  enabled: boolean
   storageSourceKeys?: string[]
   storageSourceRoots?: Record<string, string[]>
   disabledOperations?: string[]
+  activeSessionCount: number
   createdAt: string
+}
+
+export interface SessionEntry {
+  id: number
+  userId: number
+  username: string
+  ip: string
+  userAgent: string
+  current: boolean
+  createdAt: string
+  lastSeenAt: string
+  expiresAt: string
+  revokedAt?: string
 }
 
 export interface Dashboard {
@@ -104,14 +145,71 @@ export interface Dashboard {
   storageSources: string[]
 }
 
-type ApiOptions = RequestInit & { skipAuthRedirect?: boolean }
+type ApiOptions = RequestInit & { skipAuthRedirect?: boolean, skipCsrf?: boolean }
+
+const csrfHeaderName = 'X-CSRF-Token'
+let csrfToken = ''
+let csrfTokenRequest: Promise<string> | undefined
+
+function rememberCsrfToken(value: unknown) {
+  if (value && typeof value === 'object' && 'csrfToken' in value) {
+    const token = (value as { csrfToken?: unknown }).csrfToken
+    csrfToken = typeof token === 'string' ? token : ''
+  }
+}
+
+function requestMethod(options: RequestInit) {
+  return (options.method || 'GET').toUpperCase()
+}
+
+function isMutatingMethod(method: string) {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(method)
+}
+
+function skipsCsrf(url: string, options: ApiOptions) {
+  return options.skipCsrf || url === '/api/auth/login' || url === '/api/auth/setup'
+}
+
+async function ensureCsrfToken() {
+  if (csrfToken)
+    return csrfToken
+  if (!csrfTokenRequest) {
+    csrfTokenRequest = fetch('/api/auth/me', { credentials: 'same-origin' })
+      .then(async (res) => {
+        if (!res.ok)
+          return ''
+        const data = await res.json()
+        rememberCsrfToken(data)
+        return csrfToken
+      })
+      .finally(() => {
+        csrfTokenRequest = undefined
+      })
+  }
+  return csrfTokenRequest
+}
+
+export async function csrfHeaders(): Promise<Record<string, string>> {
+  const token = await ensureCsrfToken()
+  return token ? { [csrfHeaderName]: token } : {}
+}
 
 export async function api<T>(url: string, options: ApiOptions = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type'))
     headers.set('Content-Type', 'application/json')
 
-  const { skipAuthRedirect, ...fetchOptions } = options
+  const method = requestMethod(options)
+  if (isMutatingMethod(method) && !skipsCsrf(url, options)) {
+    const token = await ensureCsrfToken()
+    if (token)
+      headers.set(csrfHeaderName, token)
+  }
+
+  const { skipAuthRedirect } = options
+  const fetchOptions: ApiOptions = { ...options }
+  delete fetchOptions.skipAuthRedirect
+  delete fetchOptions.skipCsrf
   const res = await fetch(url, { ...fetchOptions, headers, credentials: 'same-origin' })
   if (!skipAuthRedirect && res.status === 401 && !location.pathname.startsWith('/login') && !location.pathname.startsWith('/s/')) {
     location.href = `/login?redirect=${encodeURIComponent(location.pathname)}`
@@ -121,7 +219,9 @@ export async function api<T>(url: string, options: ApiOptions = {}): Promise<T> 
     throw new Error(await res.text() || res.statusText)
   if (res.status === 204)
     return undefined as T
-  return res.json() as Promise<T>
+  const data = await res.json()
+  rememberCsrfToken(data)
+  return data as T
 }
 
 export function fileUrl(path: string, storageKey = 'local', preview = false) {

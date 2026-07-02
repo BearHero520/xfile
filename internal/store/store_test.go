@@ -425,6 +425,51 @@ func TestMoveFile(t *testing.T) {
 	}
 }
 
+func TestCopySourceFile(t *testing.T) {
+	s := newTestStore(t)
+	root, err := s.FilePath("")
+	if err != nil {
+		t.Fatalf("root path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "docs", "folder"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "readme.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "folder", "note.txt"), []byte("note"), 0o644); err != nil {
+		t.Fatalf("write nested file: %v", err)
+	}
+
+	fileEntry, err := s.CopySourceFile("local", "docs/readme.txt", "archive/readme.txt")
+	if err != nil {
+		t.Fatalf("copy file: %v", err)
+	}
+	if fileEntry.Path != "archive/readme.txt" {
+		t.Fatalf("file entry path = %q", fileEntry.Path)
+	}
+	if _, err := os.Stat(filepath.Join(root, "docs", "readme.txt")); err != nil {
+		t.Fatalf("source file should remain: %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "archive", "readme.txt")); err != nil || string(content) != "hello" {
+		t.Fatalf("copied file content = %q, %v", string(content), err)
+	}
+
+	folderEntry, err := s.CopySourceFile("local", "docs/folder", "archive/folder")
+	if err != nil {
+		t.Fatalf("copy folder: %v", err)
+	}
+	if folderEntry.Type != "folder" || folderEntry.Path != "archive/folder" {
+		t.Fatalf("folder entry = %#v", folderEntry)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "archive", "folder", "note.txt")); err != nil || string(content) != "note" {
+		t.Fatalf("copied folder content = %q, %v", string(content), err)
+	}
+	if _, err := s.CopySourceFile("local", "docs/folder", "docs/folder/nested"); err == nil {
+		t.Fatal("expected copying folder into itself to fail")
+	}
+}
+
 func TestSearchFiles(t *testing.T) {
 	s := newTestStore(t)
 	docs, err := s.FilePath("docs/manuals")
@@ -491,6 +536,34 @@ func TestSharePassword(t *testing.T) {
 	}
 }
 
+func TestCustomShareKey(t *testing.T) {
+	s := newTestStore(t)
+	path, err := s.FilePath("report.txt")
+	if err != nil {
+		t.Fatalf("file path: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	share, err := s.CreateShareWithToken("report.txt", "", "", "project-docs")
+	if err != nil {
+		t.Fatalf("create custom share: %v", err)
+	}
+	if share.Token != "project-docs" || share.URL != "/s/project-docs" {
+		t.Fatalf("unexpected custom share: %#v", share)
+	}
+	if resolved, err := s.ResolveShare("project-docs", ""); err != nil || resolved.Path != "report.txt" {
+		t.Fatalf("resolve custom share = %#v, %v", resolved, err)
+	}
+	if _, err := s.CreateShareWithToken("report.txt", "", "", "project-docs"); err == nil {
+		t.Fatal("expected duplicate custom share key to fail")
+	}
+	if _, err := s.CreateShareWithToken("report.txt", "", "", "../bad"); err == nil {
+		t.Fatal("expected invalid custom share key to fail")
+	}
+}
+
 func TestCreateSuperAdminAndAuthenticate(t *testing.T) {
 	s := newTestStore(t)
 
@@ -530,7 +603,7 @@ func TestManageUsers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	if user.Username != "operator" || user.Role != "admin" {
+	if user.Username != "operator" || user.Role != "admin" || !user.Enabled {
 		t.Fatalf("unexpected user: %#v", user)
 	}
 	if len(user.StorageSourceKeys) != 1 || user.StorageSourceKeys[0] != "local" {
@@ -588,6 +661,15 @@ func TestManageUsers(t *testing.T) {
 	if _, err := s.AuthenticateUser("ops", "newpass123"); err != nil {
 		t.Fatalf("authenticate updated user: %v", err)
 	}
+	if _, err := s.UpdateUserWithPolicyStatus(updated.ID, "ops", "", "super_admin", nil, nil, nil, false); err != nil {
+		t.Fatalf("disable updated user: %v", err)
+	}
+	if _, err := s.AuthenticateUser("ops", "newpass123"); err == nil {
+		t.Fatal("expected disabled user authentication to fail")
+	}
+	if _, err := s.UpdateUserWithPolicyStatus(usersMustFindID(t, s, "admin"), "admin", "", "super_admin", nil, nil, nil, false); err == nil {
+		t.Fatal("expected disabling the last enabled super admin to fail")
+	}
 	users, err := s.Users()
 	if err != nil {
 		t.Fatalf("list users: %v", err)
@@ -601,6 +683,78 @@ func TestManageUsers(t *testing.T) {
 	if err := s.DeleteUser(users[0].ID); err == nil {
 		t.Fatal("expected deleting last user to fail")
 	}
+}
+
+func TestManageSessions(t *testing.T) {
+	s := newTestStore(t)
+	user, err := s.CreateSuperAdmin("admin", "password123")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	session, token, err := s.CreateSession(user, "198.51.100.20", "test-agent", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	resolved, err := s.SessionByToken(token)
+	if err != nil {
+		t.Fatalf("resolve session: %v", err)
+	}
+	if resolved.ID != session.ID || resolved.Username != "admin" || resolved.IP != "198.51.100.20" {
+		t.Fatalf("unexpected session: %#v", resolved)
+	}
+	users, err := s.Users()
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	if len(users) != 1 || users[0].ActiveSessionCount != 1 {
+		t.Fatalf("unexpected active session count: %#v", users)
+	}
+	if _, err := s.RevokeSession(user.ID, session.ID); err != nil {
+		t.Fatalf("revoke session: %v", err)
+	}
+	if _, err := s.SessionByToken(token); err == nil {
+		t.Fatal("expected revoked session to be rejected")
+	}
+	users, err = s.Users()
+	if err != nil {
+		t.Fatalf("list users after revoke: %v", err)
+	}
+	if users[0].ActiveSessionCount != 0 {
+		t.Fatalf("expected no active sessions: %#v", users[0])
+	}
+}
+
+func TestPasswordChangeRevokesUserSessions(t *testing.T) {
+	s := newTestStore(t)
+	user, err := s.CreateSuperAdmin("admin", "password123")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	_, token, err := s.CreateSession(user, "198.51.100.21", "test-agent", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := s.UpdateUserWithPolicyStatus(user.ID, "admin", "newpass123", "super_admin", nil, nil, nil, true); err != nil {
+		t.Fatalf("update password: %v", err)
+	}
+	if _, err := s.SessionByToken(token); err == nil {
+		t.Fatal("expected password change to revoke active sessions")
+	}
+}
+
+func usersMustFindID(t *testing.T, s *Store, username string) int64 {
+	t.Helper()
+	users, err := s.Users()
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	for _, user := range users {
+		if user.Username == username {
+			return user.ID
+		}
+	}
+	t.Fatalf("user %q not found", username)
+	return 0
 }
 
 func TestUploadRules(t *testing.T) {
@@ -643,6 +797,177 @@ func TestUploadRules(t *testing.T) {
 	}
 	if err := s.UploadAllowed("incoming", "readme.txt"); err == nil {
 		t.Fatal("expected overwrite rule to block existing target")
+	}
+}
+
+func TestSaveSourceTextFileUpdatesExistingFile(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SaveSettings(map[string]string{
+		"uploadAllowExtensions": ".txt",
+		"uploadPathAllowList":   "editable",
+		"uploadOverwrite":       "disabled",
+	}); err != nil {
+		t.Fatalf("save upload rules: %v", err)
+	}
+	target, err := s.FilePath("editable/note.txt")
+	if err != nil {
+		t.Fatalf("target path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	entry, err := s.SaveSourceTextFile("local", "editable/note.txt", "updated")
+	if err != nil {
+		t.Fatalf("save text file: %v", err)
+	}
+	if entry.Path != "editable/note.txt" || entry.Size != int64(len("updated")) {
+		t.Fatalf("unexpected entry: %#v", entry)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(body) != "updated" {
+		t.Fatalf("unexpected body: %q", string(body))
+	}
+}
+
+func TestSaveSourceTextFileRequiresExistingEditableAllowedPath(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SaveSettings(map[string]string{
+		"uploadAllowExtensions": ".txt",
+		"uploadPathAllowList":   "editable",
+	}); err != nil {
+		t.Fatalf("save upload rules: %v", err)
+	}
+	root, err := s.FilePath("editable")
+	if err != nil {
+		t.Fatalf("root path: %v", err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatalf("write note: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "note.md"), []byte("old"), 0o644); err != nil {
+		t.Fatalf("write md: %v", err)
+	}
+
+	if _, err := s.SaveSourceTextFile("local", "editable/missing.txt", "new"); err == nil {
+		t.Fatal("expected missing file to fail")
+	}
+	if _, err := s.SaveSourceTextFile("local", "blocked/note.txt", "new"); err == nil {
+		t.Fatal("expected path allow list to block save")
+	}
+	if _, err := s.SaveSourceTextFile("local", "editable/note.md", "new"); err == nil {
+		t.Fatal("expected extension allow list to block save")
+	}
+	if _, err := s.SaveSourceTextFile("local", "editable/image.png", "new"); err == nil {
+		t.Fatal("expected non-text extension to block save")
+	}
+}
+
+func TestFileDescriptionsAreReturnedAndSearchable(t *testing.T) {
+	s := newTestStore(t)
+	target, err := s.FilePath("docs/readme.txt")
+	if err != nil {
+		t.Fatalf("target path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	entry, err := s.SaveFileDescription("local", "docs/readme.txt", "Release notes for operators")
+	if err != nil {
+		t.Fatalf("save description: %v", err)
+	}
+	if entry.Description != "Release notes for operators" || entry.MetadataUpdatedAt == "" {
+		t.Fatalf("unexpected metadata entry: %#v", entry)
+	}
+	files, err := s.ListSourceFilesForAdmin("local", "docs")
+	if err != nil {
+		t.Fatalf("list files: %v", err)
+	}
+	if len(files) != 1 || files[0].Description != "Release notes for operators" {
+		t.Fatalf("expected description in list: %#v", files)
+	}
+	results, err := s.SearchSourceFiles("local", "operators", 10)
+	if err != nil {
+		t.Fatalf("search files: %v", err)
+	}
+	if len(results) != 1 || results[0].Path != "docs/readme.txt" || results[0].Description == "" {
+		t.Fatalf("expected description search result: %#v", results)
+	}
+	entry, err = s.SaveFileDescription("local", "docs/readme.txt", "")
+	if err != nil {
+		t.Fatalf("clear description: %v", err)
+	}
+	if entry.Description != "" || entry.MetadataUpdatedAt != "" {
+		t.Fatalf("expected metadata to be cleared: %#v", entry)
+	}
+}
+
+func TestFileDescriptionsFollowMoveCopyAndDelete(t *testing.T) {
+	s := newTestStore(t)
+	root, err := s.FilePath("docs")
+	if err != nil {
+		t.Fatalf("root path: %v", err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "guide.txt"), []byte("guide"), 0o644); err != nil {
+		t.Fatalf("write guide: %v", err)
+	}
+	if _, err := s.SaveFileDescription("local", "docs", "Folder note"); err != nil {
+		t.Fatalf("save folder description: %v", err)
+	}
+	if _, err := s.SaveFileDescription("local", "docs/guide.txt", "Guide note"); err != nil {
+		t.Fatalf("save file description: %v", err)
+	}
+	if _, err := s.MoveSourceFile("local", "docs", "archive/docs"); err != nil {
+		t.Fatalf("move docs: %v", err)
+	}
+	moved, err := s.ListSourceFilesForAdmin("local", "archive")
+	if err != nil {
+		t.Fatalf("list archive: %v", err)
+	}
+	if len(moved) != 1 || moved[0].Description != "Folder note" {
+		t.Fatalf("expected moved folder description: %#v", moved)
+	}
+	children, err := s.ListSourceFilesForAdmin("local", "archive/docs")
+	if err != nil {
+		t.Fatalf("list moved docs: %v", err)
+	}
+	if len(children) != 1 || children[0].Description != "Guide note" {
+		t.Fatalf("expected moved child description: %#v", children)
+	}
+	if _, err := s.CopySourceFile("local", "archive/docs", "copies/docs"); err != nil {
+		t.Fatalf("copy docs: %v", err)
+	}
+	copied, err := s.ListSourceFilesForAdmin("local", "copies/docs")
+	if err != nil {
+		t.Fatalf("list copied docs: %v", err)
+	}
+	if len(copied) != 1 || copied[0].Description != "Guide note" {
+		t.Fatalf("expected copied child description: %#v", copied)
+	}
+	if err := s.DeleteSourceFile("local", "archive/docs"); err != nil {
+		t.Fatalf("delete moved docs: %v", err)
+	}
+	results, err := s.SearchSourceFiles("local", "Guide note", 10)
+	if err != nil {
+		t.Fatalf("search description: %v", err)
+	}
+	if len(results) != 1 || results[0].Path != "copies/docs/guide.txt" {
+		t.Fatalf("expected only copied metadata after delete: %#v", results)
 	}
 }
 
@@ -723,6 +1048,77 @@ func TestShareAndDirectLinkStats(t *testing.T) {
 	}
 	if links[0].AccessCount != 1 || links[0].LastAccessAt == "" {
 		t.Fatalf("unexpected direct link stats: %#v", links[0])
+	}
+
+	if err := s.LogAccess("share-view", "report.txt", "192.0.2.10", "browser"); err != nil {
+		t.Fatalf("log share view: %v", err)
+	}
+	if err := s.LogAccess("share-download", "report.txt", "192.0.2.10", "browser"); err != nil {
+		t.Fatalf("log share download: %v", err)
+	}
+	if err := s.LogAccess("direct", "report.txt", "192.0.2.11", "client"); err != nil {
+		t.Fatalf("log direct access: %v", err)
+	}
+	analytics, err := s.LinkAnalytics()
+	if err != nil {
+		t.Fatalf("link analytics: %v", err)
+	}
+	if len(analytics.ShareVisits) != 2 {
+		t.Fatalf("share visits = %d, want 2", len(analytics.ShareVisits))
+	}
+	if len(analytics.DirectLinkAccesses) != 1 || analytics.DirectLinkAccesses[0].Path != "report.txt" {
+		t.Fatalf("unexpected direct link accesses: %#v", analytics.DirectLinkAccesses)
+	}
+	if len(analytics.DownloadRanking) != 1 || analytics.DownloadRanking[0].Path != "report.txt" || analytics.DownloadRanking[0].Count != 2 {
+		t.Fatalf("unexpected download ranking: %#v", analytics.DownloadRanking)
+	}
+}
+
+func TestDeleteExpiredShares(t *testing.T) {
+	s := newTestStore(t)
+	file, err := s.FilePath("report.txt")
+	if err != nil {
+		t.Fatalf("file path: %v", err)
+	}
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	expired, err := s.CreateShare("report.txt", time.Now().Add(-time.Hour).Format(time.RFC3339), "")
+	if err != nil {
+		t.Fatalf("create expired share: %v", err)
+	}
+	active, err := s.CreateShare("report.txt", time.Now().Add(time.Hour).Format(time.RFC3339), "")
+	if err != nil {
+		t.Fatalf("create active share: %v", err)
+	}
+	permanent, err := s.CreateShare("report.txt", "", "")
+	if err != nil {
+		t.Fatalf("create permanent share: %v", err)
+	}
+
+	deleted, err := s.DeleteExpiredShares()
+	if err != nil {
+		t.Fatalf("delete expired shares: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", deleted)
+	}
+	if _, err := s.ResolveShare(expired.Token, ""); err == nil {
+		t.Fatal("expected expired share to be deleted")
+	}
+	if _, err := s.ResolveShare(active.Token, ""); err != nil {
+		t.Fatalf("active share should remain: %v", err)
+	}
+	if _, err := s.ResolveShare(permanent.Token, ""); err != nil {
+		t.Fatalf("permanent share should remain: %v", err)
+	}
+	count, err := s.ShareCount()
+	if err != nil {
+		t.Fatalf("share count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("share count = %d, want 2", count)
 	}
 }
 

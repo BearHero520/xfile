@@ -1,11 +1,20 @@
 package domain
 
 type FileEntry struct {
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	Type       string `json:"type"`
-	Size       int64  `json:"size"`
-	ModifiedAt string `json:"modifiedAt"`
+	Name              string `json:"name"`
+	Path              string `json:"path"`
+	Type              string `json:"type"`
+	Size              int64  `json:"size"`
+	ModifiedAt        string `json:"modifiedAt"`
+	Description       string `json:"description,omitempty"`
+	MetadataUpdatedAt string `json:"metadataUpdatedAt,omitempty"`
+}
+
+type FileMetadata struct {
+	StorageKey  string `json:"storageKey"`
+	Path        string `json:"path"`
+	Description string `json:"description"`
+	UpdatedAt   string `json:"updatedAt,omitempty"`
 }
 
 type StorageSource struct {
@@ -63,6 +72,7 @@ type ShareDetail struct {
 	Name        string      `json:"name"`
 	Type        string      `json:"type"`
 	Size        int64       `json:"size"`
+	Description string      `json:"description,omitempty"`
 	Protected   bool        `json:"protected"`
 	ExpiresAt   string      `json:"expiresAt,omitempty"`
 	CreatedAt   string      `json:"createdAt"`
@@ -73,10 +83,25 @@ type User struct {
 	ID                 int64               `json:"id"`
 	Username           string              `json:"username"`
 	Role               string              `json:"role"`
+	Enabled            bool                `json:"enabled"`
 	StorageSourceKeys  []string            `json:"storageSourceKeys,omitempty"`
 	StorageSourceRoots map[string][]string `json:"storageSourceRoots,omitempty"`
 	DisabledOperations []string            `json:"disabledOperations,omitempty"`
+	ActiveSessionCount int                 `json:"activeSessionCount"`
 	CreatedAt          string              `json:"createdAt"`
+}
+
+type Session struct {
+	ID         int64  `json:"id"`
+	UserID     int64  `json:"userId"`
+	Username   string `json:"username"`
+	IP         string `json:"ip"`
+	UserAgent  string `json:"userAgent"`
+	Current    bool   `json:"current"`
+	CreatedAt  string `json:"createdAt"`
+	LastSeenAt string `json:"lastSeenAt"`
+	ExpiresAt  string `json:"expiresAt"`
+	RevokedAt  string `json:"revokedAt,omitempty"`
 }
 
 type DirectLink struct {
@@ -104,6 +129,18 @@ type AccessLogPage struct {
 	Total    int         `json:"total"`
 	Page     int         `json:"page"`
 	PageSize int         `json:"pageSize"`
+}
+
+type PathMetric struct {
+	Path         string `json:"path"`
+	Count        int    `json:"count"`
+	LastAccessAt string `json:"lastAccessAt,omitempty"`
+}
+
+type LinkAnalytics struct {
+	ShareVisits        []AccessLog  `json:"shareVisits"`
+	DownloadRanking    []PathMetric `json:"downloadRanking"`
+	DirectLinkAccesses []AccessLog  `json:"directLinkAccesses"`
 }
 
 type Dashboard struct {

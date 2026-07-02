@@ -35,6 +35,7 @@ func Migrate(db *sql.DB) error {
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'super_admin',
+			enabled INTEGER NOT NULL DEFAULT 1,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -75,6 +76,15 @@ func Migrate(db *sql.DB) error {
 			user_agent TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS file_metadata (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			storage_key TEXT NOT NULL,
+			path TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(storage_key, path)
+		)`,
 		`CREATE TABLE IF NOT EXISTS user_storage_sources (
 			user_id INTEGER NOT NULL,
 			storage_source_id INTEGER NOT NULL,
@@ -83,7 +93,22 @@ func Migrate(db *sql.DB) error {
 			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
 			FOREIGN KEY(storage_source_id) REFERENCES storage_sources(id) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			token_hash TEXT NOT NULL UNIQUE,
+			user_id INTEGER NOT NULL,
+			ip TEXT NOT NULL DEFAULT '',
+			user_agent TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			expires_at TEXT NOT NULL,
+			revoked_at TEXT,
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_access_logs_created_at ON access_logs(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_file_metadata_source_path ON file_metadata(storage_key, path)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -124,6 +149,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, "users", "disabled_operations", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "users", "enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
 	return nil

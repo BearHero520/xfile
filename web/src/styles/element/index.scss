@@ -29,17 +29,8 @@ $--colors: (
 @forward 'element-plus/theme-chalk/src/common/var.scss' with (
   // do not use same name, it will override.
   $colors: $--colors,
-  $border-radius: (
-    'base': 10px,
-    'small': 8px,
-    'round': 999px,
-    'circle': 100%,
-  ),
-  $button-padding-horizontal: (
-    'default': 14px,
-    'small': 12px,
-    'large': 18px,
-  )
+  $border-radius: ('base': 10px, 'small': 8px, 'round': 999px, 'circle': 100%),
+  $button-padding-horizontal: ('default': 14px, 'small': 12px, 'large': 18px)
 );
 
 // if you want to import all

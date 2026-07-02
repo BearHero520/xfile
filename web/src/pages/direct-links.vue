@@ -1,17 +1,27 @@
 <script setup lang="ts">
-import type { DirectLinkEntry } from '~/api'
+import type { DirectLinkEntry, LinkAnalytics } from '~/api'
 import { Delete, Link } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { onMounted, ref } from 'vue'
 import { api, formatTime } from '~/api'
 
 const links = ref<DirectLinkEntry[]>([])
+const analytics = ref<LinkAnalytics>({
+  shareVisits: [],
+  downloadRanking: [],
+  directLinkAccesses: [],
+})
 const loading = ref(false)
 
 async function loadLinks() {
   loading.value = true
   try {
-    links.value = await api<DirectLinkEntry[]>('/api/direct-links')
+    const [linkList, analyticsData] = await Promise.all([
+      api<DirectLinkEntry[]>('/api/direct-links'),
+      api<LinkAnalytics>('/api/analytics/links'),
+    ])
+    links.value = linkList
+    analytics.value = analyticsData
   }
   finally {
     loading.value = false
@@ -42,7 +52,7 @@ onMounted(loadLinks)
 </script>
 
 <template>
-  <div class="workspace" v-loading="loading">
+  <div v-loading="loading" class="workspace">
     <section class="panel">
       <div class="panel-title">
         直链 / 短链
@@ -80,6 +90,22 @@ onMounted(loadLinks)
           </template>
         </el-table-column>
       </el-table>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">
+        最近直链访问
+      </div>
+      <div v-for="log in analytics.directLinkAccesses" :key="log.id" class="list-row">
+        <div>
+          <strong>{{ log.path || '/' }}</strong>
+          <span>{{ log.ip }} / {{ log.userAgent || '-' }}</span>
+        </div>
+        <el-tag size="small" type="warning" effect="plain">
+          {{ formatTime(log.createdAt) }}
+        </el-tag>
+      </div>
+      <el-empty v-if="!analytics.directLinkAccesses.length" description="暂无直链访问" />
     </section>
   </div>
 </template>

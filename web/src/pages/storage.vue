@@ -289,7 +289,7 @@ onMounted(loadSources)
 </script>
 
 <template>
-  <div class="workspace" v-loading="loading">
+  <div v-loading="loading" class="workspace">
     <section class="overview-band">
       <div>
         <p class="eyebrow">

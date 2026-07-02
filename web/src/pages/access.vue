@@ -25,6 +25,9 @@ const form = reactive({
   refererProtection: 'disabled',
   refererAllowList: '',
   downloadLimitPerMinute: '0',
+  loginLimitPerMinute: '5',
+  loginCaptcha: 'disabled',
+  sharePasswordLimitPerMinute: '5',
 })
 
 async function loadSettings() {
@@ -39,6 +42,9 @@ async function loadSettings() {
     form.refererProtection = settings.refererProtection || 'disabled'
     form.refererAllowList = settings.refererAllowList || ''
     form.downloadLimitPerMinute = settings.downloadLimitPerMinute || '0'
+    form.loginLimitPerMinute = settings.loginLimitPerMinute || '5'
+    form.loginCaptcha = settings.loginCaptcha || 'disabled'
+    form.sharePasswordLimitPerMinute = settings.sharePasswordLimitPerMinute || '5'
   }
   finally {
     loading.value = false
@@ -59,6 +65,9 @@ async function saveRules() {
         refererProtection: form.refererProtection,
         refererAllowList: form.refererAllowList,
         downloadLimitPerMinute: form.downloadLimitPerMinute,
+        loginLimitPerMinute: form.loginLimitPerMinute,
+        loginCaptcha: form.loginCaptcha,
+        sharePasswordLimitPerMinute: form.sharePasswordLimitPerMinute,
       }),
     })
     ElMessage.success('访问控制规则已保存')
@@ -72,7 +81,7 @@ onMounted(loadSettings)
 </script>
 
 <template>
-  <div class="workspace" v-loading="loading">
+  <div v-loading="loading" class="workspace">
     <section class="panel access-panel">
       <div class="panel-heading">
         <div>
@@ -80,7 +89,7 @@ onMounted(loadSettings)
             访问控制
           </div>
           <p class="lede">
-            配置后台接口、公开分享和直链访问的 IP、路径、来源与下载策略。
+            配置后台接口、公开分享和直链访问的 IP、路径、来源与限频策略。
           </p>
         </div>
       </div>
@@ -145,12 +154,29 @@ onMounted(loadSettings)
           </el-form-item>
         </div>
 
-        <el-form-item label="下载限频">
-          <el-input
-            v-model="form.downloadLimitPerMinute"
-            placeholder="每个 IP 每分钟允许的下载次数，0 表示关闭"
-          />
-        </el-form-item>
+        <div class="access-form-grid">
+          <el-form-item label="下载限频">
+            <el-input
+              v-model="form.downloadLimitPerMinute"
+              placeholder="每个 IP 每分钟允许的下载次数，0 表示关闭"
+            />
+          </el-form-item>
+          <el-form-item label="登录限频">
+            <el-input
+              v-model="form.loginLimitPerMinute"
+              placeholder="每个 IP 每分钟允许的登录次数，0 表示关闭"
+            />
+          </el-form-item>
+          <el-form-item label="登录验证码">
+            <el-switch v-model="form.loginCaptcha" active-value="enabled" inactive-value="disabled" />
+          </el-form-item>
+          <el-form-item label="分享密码限频">
+            <el-input
+              v-model="form.sharePasswordLimitPerMinute"
+              placeholder="每个 IP 每分钟允许的错误分享密码次数，0 表示关闭"
+            />
+          </el-form-item>
+        </div>
 
         <el-form-item>
           <el-button type="primary" :loading="saving" @click="saveRules">
@@ -174,6 +200,12 @@ onMounted(loadSettings)
         </el-tag>
         <el-tag type="info">
           下载限频
+        </el-tag>
+        <el-tag type="warning">
+          登录限频
+        </el-tag>
+        <el-tag type="warning">
+          分享密码限频
         </el-tag>
       </div>
     </section>

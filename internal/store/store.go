@@ -33,6 +33,10 @@ type Store struct {
 	cfg config.Config
 }
 
+var ErrInvalidSharePassword = errors.New("invalid share password")
+
+const sessionTokenBytes = 32
+
 type readSeekCloser interface {
 	io.Reader
 	io.Seeker
@@ -113,6 +117,7 @@ var supportedStorageTypes = map[string]string{
 }
 
 var storageKeyPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,64}$`)
+var shareTokenPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{4,64}$`)
 
 func (s *Store) ensureDefaultStorageSources() error {
 	var count int
@@ -149,52 +154,57 @@ func (s *Store) Settings() (map[string]string, error) {
 	defer rows.Close()
 
 	settings := map[string]string{
-		"siteName":                s.cfg.SiteName,
-		"rootName":                "首页",
-		"webdav":                  "disabled",
-		"webdavMountPath":         "/dav",
-		"webdavReadOnly":          "disabled",
-		"webdavAllowAnonymous":    "disabled",
-		"webdavUsername":          "",
-		"webdavPassword":          "",
-		"publicIndex":             "disabled",
-		"storageProvider":         "local",
-		"storageLocalRoot":        s.cfg.FilesDir,
-		"storageS3Endpoint":       "",
-		"storageS3Bucket":         "",
-		"storageS3Region":         "",
-		"storageS3AccessKey":      "",
-		"storageS3SecretKey":      "",
-		"storageS3Prefix":         "",
-		"storageAliyunEndpoint":   "",
-		"storageAliyunBucket":     "",
-		"storageAliyunAccessKey":  "",
-		"storageAliyunSecretKey":  "",
-		"storageAliyunPrefix":     "",
-		"storageWebDAVURL":        "",
-		"storageWebDAVUsername":   "",
-		"storageWebDAVPassword":   "",
-		"storageWebDAVRoot":       "",
-		"storageTencentEndpoint":  "",
-		"storageTencentBucket":    "",
-		"storageTencentSecretID":  "",
-		"storageTencentSecretKey": "",
-		"storageTencentPrefix":    "",
-		"allowUpload":             "enabled",
-		"maxUploadMB":             "512",
-		"uploadAllowExtensions":   "",
-		"uploadDenyExtensions":    "",
-		"uploadPathAllowList":     "",
-		"uploadPathDenyList":      "",
-		"uploadOverwrite":         "enabled",
-		"ipAllowList":             "",
-		"ipDenyList":              "",
-		"privatePathList":         "",
-		"directoryPasswordRules":  "",
-		"disabledOperations":      "",
-		"refererProtection":       "disabled",
-		"refererAllowList":        "",
-		"downloadLimitPerMinute":  "0",
+		"siteName":                    s.cfg.SiteName,
+		"rootName":                    "首页",
+		"webdav":                      "disabled",
+		"webdavMountPath":             "/dav",
+		"webdavReadOnly":              "disabled",
+		"webdavAllowAnonymous":        "disabled",
+		"webdavUsername":              "",
+		"webdavPassword":              "",
+		"publicIndex":                 "disabled",
+		"storageProvider":             "local",
+		"storageLocalRoot":            s.cfg.FilesDir,
+		"storageS3Endpoint":           "",
+		"storageS3Bucket":             "",
+		"storageS3Region":             "",
+		"storageS3AccessKey":          "",
+		"storageS3SecretKey":          "",
+		"storageS3Prefix":             "",
+		"storageAliyunEndpoint":       "",
+		"storageAliyunBucket":         "",
+		"storageAliyunAccessKey":      "",
+		"storageAliyunSecretKey":      "",
+		"storageAliyunPrefix":         "",
+		"storageWebDAVURL":            "",
+		"storageWebDAVUsername":       "",
+		"storageWebDAVPassword":       "",
+		"storageWebDAVRoot":           "",
+		"storageTencentEndpoint":      "",
+		"storageTencentBucket":        "",
+		"storageTencentSecretID":      "",
+		"storageTencentSecretKey":     "",
+		"storageTencentPrefix":        "",
+		"allowUpload":                 "enabled",
+		"maxUploadMB":                 "512",
+		"uploadAllowExtensions":       "",
+		"uploadDenyExtensions":        "",
+		"uploadPathAllowList":         "",
+		"uploadPathDenyList":          "",
+		"uploadOverwrite":             "enabled",
+		"ipAllowList":                 "",
+		"ipDenyList":                  "",
+		"privatePathList":             "",
+		"directoryPasswordRules":      "",
+		"disabledOperations":          "",
+		"refererProtection":           "disabled",
+		"refererAllowList":            "",
+		"downloadLimitPerMinute":      "0",
+		"loginLimitPerMinute":         "5",
+		"sharePasswordLimitPerMinute": "5",
+		"externalPreviewProvider":     "disabled",
+		"externalPreviewBaseUrl":      "",
+		"externalPreviewTemplate":     "",
 	}
 	for rows.Next() {
 		var key, value string
@@ -225,6 +235,177 @@ func (s *Store) IsInitialized() (bool, error) {
 	return count > 0, nil
 }
 
+func (s *Store) CreateSession(user domain.User, ip, userAgent string, expires time.Time) (domain.Session, string, error) {
+	if user.ID < 1 {
+		return domain.Session{}, "", errors.New("invalid user id")
+	}
+	if !user.Enabled {
+		return domain.Session{}, "", errors.New("user is disabled")
+	}
+	if expires.IsZero() || !expires.After(time.Now()) {
+		return domain.Session{}, "", errors.New("session expiry must be in the future")
+	}
+	token, err := newSessionToken()
+	if err != nil {
+		return domain.Session{}, "", err
+	}
+	if len(userAgent) > 512 {
+		userAgent = userAgent[:512]
+	}
+	res, err := s.db.Exec(`INSERT INTO sessions(token_hash, user_id, ip, user_agent, expires_at)
+		VALUES(?, ?, ?, ?, ?)`, sessionTokenHash(token), user.ID, strings.TrimSpace(ip), strings.TrimSpace(userAgent), dbTime(expires))
+	if err != nil {
+		return domain.Session{}, "", err
+	}
+	id, _ := res.LastInsertId()
+	session, err := s.sessionByID(id)
+	if err != nil {
+		return domain.Session{}, "", err
+	}
+	return session, token, nil
+}
+
+func (s *Store) SessionByToken(token string) (domain.Session, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return domain.Session{}, sql.ErrNoRows
+	}
+	session, err := scanSession(s.db.QueryRow(`SELECT s.id, s.user_id, u.username, s.ip, s.user_agent, s.created_at, s.last_seen_at, s.expires_at, COALESCE(s.revoked_at, '')
+		FROM sessions s
+		JOIN users u ON u.id = s.user_id
+		WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > CURRENT_TIMESTAMP AND u.enabled = 1`, sessionTokenHash(token)))
+	if err != nil {
+		return domain.Session{}, err
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?`, session.ID); err != nil {
+		return domain.Session{}, err
+	}
+	return session, nil
+}
+
+func (s *Store) SessionsForUser(userID int64) ([]domain.Session, error) {
+	if userID < 1 {
+		return nil, errors.New("invalid user id")
+	}
+	rows, err := s.db.Query(`SELECT s.id, s.user_id, u.username, s.ip, s.user_agent, s.created_at, s.last_seen_at, s.expires_at, COALESCE(s.revoked_at, '')
+		FROM sessions s
+		JOIN users u ON u.id = s.user_id
+		WHERE s.user_id = ? AND s.revoked_at IS NULL AND s.expires_at > CURRENT_TIMESTAMP
+		ORDER BY s.last_seen_at DESC, s.id DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sessions := make([]domain.Session, 0)
+	for rows.Next() {
+		session, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+func (s *Store) RevokeSession(userID, sessionID int64) (domain.Session, error) {
+	if userID < 1 || sessionID < 1 {
+		return domain.Session{}, errors.New("invalid session id")
+	}
+	res, err := s.db.Exec(`UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND revoked_at IS NULL`, sessionID, userID)
+	if err != nil {
+		return domain.Session{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return domain.Session{}, err
+	}
+	if affected == 0 {
+		return domain.Session{}, sql.ErrNoRows
+	}
+	return s.sessionByID(sessionID)
+}
+
+func (s *Store) RevokeUserSessions(userID int64) (int64, error) {
+	if userID < 1 {
+		return 0, errors.New("invalid user id")
+	}
+	res, err := s.db.Exec(`UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP
+		WHERE user_id = ? AND revoked_at IS NULL AND expires_at > CURRENT_TIMESTAMP`, userID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) RevokeSessionToken(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ? AND revoked_at IS NULL`, sessionTokenHash(token))
+	return err
+}
+
+func (s *Store) sessionByID(id int64) (domain.Session, error) {
+	return scanSession(s.db.QueryRow(`SELECT s.id, s.user_id, u.username, s.ip, s.user_agent, s.created_at, s.last_seen_at, s.expires_at, COALESCE(s.revoked_at, '')
+		FROM sessions s
+		JOIN users u ON u.id = s.user_id
+		WHERE s.id = ?`, id))
+}
+
+func (s *Store) activeSessionCount(userID int64) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE user_id = ? AND revoked_at IS NULL AND expires_at > CURRENT_TIMESTAMP`, userID).Scan(&count)
+	return count, err
+}
+
+func (s *Store) attachActiveSessionCount(user *domain.User) error {
+	count, err := s.activeSessionCount(user.ID)
+	if err != nil {
+		return err
+	}
+	user.ActiveSessionCount = count
+	return nil
+}
+
+type sessionScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSession(scanner sessionScanner) (domain.Session, error) {
+	var session domain.Session
+	err := scanner.Scan(
+		&session.ID,
+		&session.UserID,
+		&session.Username,
+		&session.IP,
+		&session.UserAgent,
+		&session.CreatedAt,
+		&session.LastSeenAt,
+		&session.ExpiresAt,
+		&session.RevokedAt,
+	)
+	return session, err
+}
+
+func newSessionToken() (string, error) {
+	buf := make([]byte, sessionTokenBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func sessionTokenHash(token string) string {
+	hash := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(hash[:])
+}
+
+func dbTime(value time.Time) string {
+	return value.UTC().Format("2006-01-02 15:04:05")
+}
+
 func (s *Store) CreateSuperAdmin(username, password string) (domain.User, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
@@ -244,12 +425,12 @@ func (s *Store) CreateSuperAdmin(username, password string) (domain.User, error)
 	if err != nil {
 		return domain.User{}, err
 	}
-	res, err := s.db.Exec(`INSERT INTO users(username, password_hash, role) VALUES(?, ?, 'super_admin')`, username, string(hash))
+	res, err := s.db.Exec(`INSERT INTO users(username, password_hash, role, enabled) VALUES(?, ?, 'super_admin', 1)`, username, string(hash))
 	if err != nil {
 		return domain.User{}, err
 	}
 	id, _ := res.LastInsertId()
-	return domain.User{ID: id, Username: username, Role: "super_admin", CreatedAt: time.Now().Format(time.RFC3339)}, nil
+	return domain.User{ID: id, Username: username, Role: "super_admin", Enabled: true, CreatedAt: time.Now().Format(time.RFC3339)}, nil
 }
 
 func (s *Store) AuthenticateUser(username, password string) (domain.User, error) {
@@ -257,10 +438,13 @@ func (s *Store) AuthenticateUser(username, password string) (domain.User, error)
 	var user domain.User
 	var passwordHash string
 	var disabledOperations string
-	err := s.db.QueryRow(`SELECT id, username, password_hash, role, COALESCE(disabled_operations, ''), created_at FROM users WHERE username = ?`, username).
-		Scan(&user.ID, &user.Username, &passwordHash, &user.Role, &disabledOperations, &user.CreatedAt)
+	err := s.db.QueryRow(`SELECT id, username, password_hash, role, enabled, COALESCE(disabled_operations, ''), created_at FROM users WHERE username = ?`, username).
+		Scan(&user.ID, &user.Username, &passwordHash, &user.Role, &user.Enabled, &disabledOperations, &user.CreatedAt)
 	if err != nil {
 		return domain.User{}, errors.New("invalid username or password")
+	}
+	if !user.Enabled {
+		return domain.User{}, errors.New("user is disabled")
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
 		return domain.User{}, errors.New("invalid username or password")
@@ -276,10 +460,13 @@ func (s *Store) UserByUsername(username string) (domain.User, error) {
 	username = strings.TrimSpace(username)
 	var user domain.User
 	var disabledOperations string
-	err := s.db.QueryRow(`SELECT id, username, role, COALESCE(disabled_operations, ''), created_at FROM users WHERE username = ?`, username).
-		Scan(&user.ID, &user.Username, &user.Role, &disabledOperations, &user.CreatedAt)
+	err := s.db.QueryRow(`SELECT id, username, role, enabled, COALESCE(disabled_operations, ''), created_at FROM users WHERE username = ?`, username).
+		Scan(&user.ID, &user.Username, &user.Role, &user.Enabled, &disabledOperations, &user.CreatedAt)
 	if err != nil {
 		return domain.User{}, err
+	}
+	if !user.Enabled {
+		return domain.User{}, errors.New("user is disabled")
 	}
 	if err := s.loadUserStorageSourceKeys(&user); err != nil {
 		return domain.User{}, err
@@ -289,7 +476,7 @@ func (s *Store) UserByUsername(username string) (domain.User, error) {
 }
 
 func (s *Store) Users() ([]domain.User, error) {
-	rows, err := s.db.Query(`SELECT id, username, role, COALESCE(disabled_operations, ''), created_at FROM users ORDER BY id ASC`)
+	rows, err := s.db.Query(`SELECT id, username, role, enabled, COALESCE(disabled_operations, ''), created_at FROM users ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -299,11 +486,14 @@ func (s *Store) Users() ([]domain.User, error) {
 	for rows.Next() {
 		var user domain.User
 		var disabledOperations string
-		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &disabledOperations, &user.CreatedAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &user.Enabled, &disabledOperations, &user.CreatedAt); err != nil {
 			return nil, err
 		}
 		user.DisabledOperations = splitOperationRules(disabledOperations)
 		if err := s.loadUserStorageSourceKeys(&user); err != nil {
+			return nil, err
+		}
+		if err := s.attachActiveSessionCount(&user); err != nil {
 			return nil, err
 		}
 		users = append(users, user)
@@ -324,6 +514,10 @@ func (s *Store) CreateUserWithStorageAccess(username, password, role string, sto
 }
 
 func (s *Store) CreateUserWithPolicy(username, password, role string, storageSourceKeys []string, storageSourceRoots map[string][]string, disabledOperations []string) (domain.User, error) {
+	return s.CreateUserWithPolicyStatus(username, password, role, storageSourceKeys, storageSourceRoots, disabledOperations, true)
+}
+
+func (s *Store) CreateUserWithPolicyStatus(username, password, role string, storageSourceKeys []string, storageSourceRoots map[string][]string, disabledOperations []string, enabled bool) (domain.User, error) {
 	username = strings.TrimSpace(username)
 	role = normalizeUserRole(role)
 	if username == "" {
@@ -340,7 +534,7 @@ func (s *Store) CreateUserWithPolicy(username, password, role string, storageSou
 	if err != nil {
 		return domain.User{}, err
 	}
-	res, err := s.db.Exec(`INSERT INTO users(username, password_hash, role, disabled_operations) VALUES(?, ?, ?, ?)`, username, string(hash), role, disabledOperationText)
+	res, err := s.db.Exec(`INSERT INTO users(username, password_hash, role, enabled, disabled_operations) VALUES(?, ?, ?, ?, ?)`, username, string(hash), role, enabled, disabledOperationText)
 	if err != nil {
 		return domain.User{}, err
 	}
@@ -364,6 +558,10 @@ func (s *Store) UpdateUserWithStorageAccess(id int64, username, password, role s
 }
 
 func (s *Store) UpdateUserWithPolicy(id int64, username, password, role string, storageSourceKeys []string, storageSourceRoots map[string][]string, disabledOperations []string) (domain.User, error) {
+	return s.UpdateUserWithPolicyStatus(id, username, password, role, storageSourceKeys, storageSourceRoots, disabledOperations, true)
+}
+
+func (s *Store) UpdateUserWithPolicyStatus(id int64, username, password, role string, storageSourceKeys []string, storageSourceRoots map[string][]string, disabledOperations []string, enabled bool) (domain.User, error) {
 	username = strings.TrimSpace(username)
 	role = normalizeUserRole(role)
 	if id < 1 {
@@ -379,9 +577,12 @@ func (s *Store) UpdateUserWithPolicy(id int64, username, password, role string, 
 	if err != nil {
 		return domain.User{}, err
 	}
+	if err := s.ensureUserStatusDoesNotLockOutAdmins(id, role, enabled); err != nil {
+		return domain.User{}, err
+	}
 
 	if strings.TrimSpace(password) == "" {
-		if _, err := s.db.Exec(`UPDATE users SET username = ?, role = ?, disabled_operations = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, role, disabledOperationText, id); err != nil {
+		if _, err := s.db.Exec(`UPDATE users SET username = ?, role = ?, enabled = ?, disabled_operations = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, role, enabled, disabledOperationText, id); err != nil {
 			return domain.User{}, err
 		}
 	} else {
@@ -389,7 +590,7 @@ func (s *Store) UpdateUserWithPolicy(id int64, username, password, role string, 
 		if err != nil {
 			return domain.User{}, err
 		}
-		if _, err := s.db.Exec(`UPDATE users SET username = ?, password_hash = ?, role = ?, disabled_operations = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, string(hash), role, disabledOperationText, id); err != nil {
+		if _, err := s.db.Exec(`UPDATE users SET username = ?, password_hash = ?, role = ?, enabled = ?, disabled_operations = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, username, string(hash), role, enabled, disabledOperationText, id); err != nil {
 			return domain.User{}, err
 		}
 	}
@@ -397,7 +598,31 @@ func (s *Store) UpdateUserWithPolicy(id int64, username, password, role string, 
 	if err := s.setUserStorageSources(id, storageSourceKeys, storageSourceRoots); err != nil {
 		return domain.User{}, err
 	}
+	if strings.TrimSpace(password) != "" || !enabled {
+		if _, err := s.RevokeUserSessions(id); err != nil {
+			return domain.User{}, err
+		}
+	}
 	return s.userByID(id)
+}
+
+func (s *Store) ensureUserStatusDoesNotLockOutAdmins(id int64, role string, enabled bool) error {
+	var currentRole string
+	var currentEnabled bool
+	if err := s.db.QueryRow(`SELECT role, enabled FROM users WHERE id = ?`, id).Scan(&currentRole, &currentEnabled); err != nil {
+		return err
+	}
+	if currentRole != "super_admin" || (role == "super_admin" && enabled) {
+		return nil
+	}
+	var remaining int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE id <> ? AND role = 'super_admin' AND enabled = 1`, id).Scan(&remaining); err != nil {
+		return err
+	}
+	if remaining == 0 {
+		return errors.New("at least one enabled super admin is required")
+	}
+	return nil
 }
 
 func (s *Store) DeleteUser(id int64) error {
@@ -425,10 +650,14 @@ func (s *Store) DeleteUser(id int64) error {
 	return nil
 }
 
+func (s *Store) UserByID(id int64) (domain.User, error) {
+	return s.userByID(id)
+}
+
 func (s *Store) userByID(id int64) (domain.User, error) {
 	var user domain.User
 	var disabledOperations string
-	err := s.db.QueryRow(`SELECT id, username, role, COALESCE(disabled_operations, ''), created_at FROM users WHERE id = ?`, id).Scan(&user.ID, &user.Username, &user.Role, &disabledOperations, &user.CreatedAt)
+	err := s.db.QueryRow(`SELECT id, username, role, enabled, COALESCE(disabled_operations, ''), created_at FROM users WHERE id = ?`, id).Scan(&user.ID, &user.Username, &user.Role, &user.Enabled, &disabledOperations, &user.CreatedAt)
 	if err != nil {
 		return domain.User{}, err
 	}
@@ -436,6 +665,9 @@ func (s *Store) userByID(id int64) (domain.User, error) {
 		return domain.User{}, err
 	}
 	user.DisabledOperations = splitOperationRules(disabledOperations)
+	if err := s.attachActiveSessionCount(&user); err != nil {
+		return domain.User{}, err
+	}
 	return user, nil
 }
 
@@ -688,6 +920,255 @@ func (s *Store) FilterStorageFilesForUser(user domain.User, key string, files []
 	return filtered
 }
 
+const maxFileDescriptionLength = 2000
+
+func (s *Store) SaveFileDescription(storageKey, rel, description string) (domain.FileEntry, error) {
+	storageKey = strings.TrimSpace(storageKeyOrDefault(storageKey))
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if clean == "" {
+		return domain.FileEntry{}, errors.New("file path is required")
+	}
+	description = strings.TrimSpace(description)
+	if len([]rune(description)) > maxFileDescriptionLength {
+		return domain.FileEntry{}, errors.New("file description is too long")
+	}
+	entry, err := s.SourceEntry(storageKey, clean, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if description == "" {
+		if _, err := s.db.Exec(`DELETE FROM file_metadata WHERE storage_key = ? AND path = ?`, storageKey, clean); err != nil {
+			return domain.FileEntry{}, err
+		}
+		entry.Description = ""
+		entry.MetadataUpdatedAt = ""
+		return entry, nil
+	}
+	if _, err := s.db.Exec(`INSERT INTO file_metadata(storage_key, path, description, updated_at)
+		VALUES(?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(storage_key, path) DO UPDATE SET description = excluded.description, updated_at = CURRENT_TIMESTAMP`, storageKey, clean, description); err != nil {
+		return domain.FileEntry{}, err
+	}
+	return s.SourceEntry(storageKey, clean, false)
+}
+
+func (s *Store) SourceEntry(storageKey, rel string, publicOnly bool) (domain.FileEntry, error) {
+	storageKey = storageKeyOrDefault(storageKey)
+	source, err := s.availableSource(storageKey, publicOnly)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if clean == "" {
+		return domain.FileEntry{}, errors.New("file path is required")
+	}
+	if publicOnly && s.IsSourceBlockedPath(source, clean) {
+		return domain.FileEntry{}, errors.New("path is blocked")
+	}
+	if source.Type == "local" {
+		path, err := s.sourceSafePath(source, clean)
+		if err != nil {
+			return domain.FileEntry{}, err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return domain.FileEntry{}, err
+		}
+		return s.applyFileMetadata(storageKey, []domain.FileEntry{fileInfoEntry(clean, info)})[0], nil
+	}
+	parent := filepath.ToSlash(filepath.Dir(clean))
+	if parent == "." {
+		parent = ""
+	}
+	files, err := s.ListSourceFilesWithPassword(storageKey, parent, publicOnly, "")
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	for _, file := range files {
+		if file.Path == clean {
+			return file, nil
+		}
+	}
+	return domain.FileEntry{}, os.ErrNotExist
+}
+
+func (s *Store) applyFileMetadata(storageKey string, files []domain.FileEntry) []domain.FileEntry {
+	if len(files) == 0 {
+		return files
+	}
+	storageKey = storageKeyOrDefault(storageKey)
+	paths := make([]string, 0, len(files))
+	indexes := make(map[string][]int, len(files))
+	for index, file := range files {
+		clean, err := cleanRelative(file.Path)
+		if err != nil || clean == "" {
+			continue
+		}
+		if _, ok := indexes[clean]; !ok {
+			paths = append(paths, clean)
+		}
+		indexes[clean] = append(indexes[clean], index)
+	}
+	if len(paths) == 0 {
+		return files
+	}
+	placeholders := make([]string, len(paths))
+	args := make([]any, 0, len(paths)+1)
+	args = append(args, storageKey)
+	for index, filePath := range paths {
+		placeholders[index] = "?"
+		args = append(args, filePath)
+	}
+	rows, err := s.db.Query(`SELECT path, description, COALESCE(updated_at, '') FROM file_metadata WHERE storage_key = ? AND path IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return files
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var filePath, description, updatedAt string
+		if err := rows.Scan(&filePath, &description, &updatedAt); err != nil {
+			return files
+		}
+		for _, index := range indexes[filePath] {
+			files[index].Description = description
+			files[index].MetadataUpdatedAt = updatedAt
+		}
+	}
+	return files
+}
+
+func (s *Store) includeMetadataSearchMatches(storageKey, query string, limit int, files []domain.FileEntry) ([]domain.FileEntry, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return files, nil
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if len(files) >= limit {
+		return files, nil
+	}
+	storageKey = storageKeyOrDefault(storageKey)
+	seen := make(map[string]bool, len(files))
+	for _, file := range files {
+		seen[file.Path] = true
+	}
+	rows, err := s.db.Query(`SELECT path FROM file_metadata WHERE storage_key = ? AND LOWER(description) LIKE ? ORDER BY updated_at DESC LIMIT ?`, storageKey, "%"+strings.ToLower(query)+"%", limit)
+	if err != nil {
+		return files, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var filePath string
+		if err := rows.Scan(&filePath); err != nil {
+			return files, err
+		}
+		if seen[filePath] {
+			continue
+		}
+		entry, err := s.SourceEntry(storageKey, filePath, false)
+		if err != nil {
+			continue
+		}
+		files = append(files, entry)
+		seen[filePath] = true
+		if len(files) >= limit {
+			break
+		}
+	}
+	return files, rows.Err()
+}
+
+func (s *Store) moveFileMetadata(storageKey, from, to string) error {
+	return s.rewriteFileMetadata(storageKey, from, to, true)
+}
+
+func (s *Store) copyFileMetadata(storageKey, from, to string) error {
+	return s.rewriteFileMetadata(storageKey, from, to, false)
+}
+
+func (s *Store) rewriteFileMetadata(storageKey, from, to string, removeSource bool) error {
+	storageKey = storageKeyOrDefault(storageKey)
+	fromClean, err := cleanRelative(from)
+	if err != nil {
+		return err
+	}
+	toClean, err := cleanRelative(to)
+	if err != nil {
+		return err
+	}
+	if fromClean == "" || toClean == "" {
+		return nil
+	}
+	rows, err := s.db.Query(`SELECT path, description FROM file_metadata WHERE storage_key = ? AND (path = ? OR path LIKE ?)`, storageKey, fromClean, fromClean+"/%")
+	if err != nil {
+		return err
+	}
+	type metadataRow struct {
+		path        string
+		description string
+	}
+	rowsToCopy := make([]metadataRow, 0)
+	for rows.Next() {
+		var row metadataRow
+		if err := rows.Scan(&row.path, &row.description); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		rowsToCopy = append(rowsToCopy, row)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(rowsToCopy) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, row := range rowsToCopy {
+		targetPath := toClean
+		if row.path != fromClean {
+			targetPath = cleanJoin(toClean, strings.TrimPrefix(row.path, fromClean+"/"))
+		}
+		if _, err := tx.Exec(`INSERT INTO file_metadata(storage_key, path, description, updated_at)
+			VALUES(?, ?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(storage_key, path) DO UPDATE SET description = excluded.description, updated_at = CURRENT_TIMESTAMP`, storageKey, targetPath, row.description); err != nil {
+			return err
+		}
+	}
+	if removeSource {
+		if _, err := tx.Exec(`DELETE FROM file_metadata WHERE storage_key = ? AND (path = ? OR path LIKE ?)`, storageKey, fromClean, fromClean+"/%"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) deleteFileMetadataTree(storageKey, rel string) error {
+	storageKey = storageKeyOrDefault(storageKey)
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return err
+	}
+	if clean == "" {
+		return nil
+	}
+	_, err = s.db.Exec(`DELETE FROM file_metadata WHERE storage_key = ? AND (path = ? OR path LIKE ?)`, storageKey, clean, clean+"/%")
+	return err
+}
+
 func (s *Store) CreateStorageSource(input domain.StorageSourceInput) (domain.StorageSource, error) {
 	normalized, err := s.normalizeStorageSourceInput(input, 0)
 	if err != nil {
@@ -864,14 +1345,16 @@ func (s *Store) ListSourceFilesWithPassword(storageKey, rel string, publicOnly b
 		if err != nil {
 			return nil, err
 		}
-		return s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files), nil
+		files = s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files)
+		return s.applyFileMetadata(storageKey, files), nil
 	}
 	if source.Type == "webdav" {
 		files, err := s.listWebDAVFiles(source, rel)
 		if err != nil {
 			return nil, err
 		}
-		return s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files), nil
+		files = s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files)
+		return s.applyFileMetadata(storageKey, files), nil
 	}
 	_, root, err := s.sourceRoot(storageKey, publicOnly)
 	if err != nil {
@@ -881,7 +1364,8 @@ func (s *Store) ListSourceFilesWithPassword(storageKey, rel string, publicOnly b
 	if err != nil {
 		return nil, err
 	}
-	return s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files), nil
+	files = s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: publicOnly}, files)
+	return s.applyFileMetadata(storageKey, files), nil
 }
 
 func (s *Store) SourceFilePath(storageKey, rel string, publicOnly bool) (string, error) {
@@ -1002,7 +1486,24 @@ func (s *Store) uploadAllowedInRoot(root, dirRel, filename string) error {
 	if _, err := safePathInRoot(root, targetRel); err != nil {
 		return err
 	}
+	if err := s.uploadRulesAllowed(targetRel, filename); err != nil {
+		return err
+	}
+	if s.SettingValue("uploadOverwrite", "enabled") != "enabled" {
+		target, err := safePathInRoot(root, targetRel)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(target); err == nil {
+			return errors.New("target already exists")
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
 
+func (s *Store) uploadRulesAllowed(targetRel, filename string) error {
 	if denyList := s.SettingValue("uploadPathDenyList", ""); pathMatchesRules(targetRel, denyList) {
 		return errors.New("upload path is denied")
 	}
@@ -1020,17 +1521,6 @@ func (s *Store) uploadAllowedInRoot(root, dirRel, filename string) error {
 	if allowList := strings.TrimSpace(s.SettingValue("uploadAllowExtensions", "")); allowList != "" && !extensionInList(ext, allowList) {
 		return errors.New("file extension is not allowed")
 	}
-	if s.SettingValue("uploadOverwrite", "enabled") != "enabled" {
-		target, err := safePathInRoot(root, targetRel)
-		if err != nil {
-			return err
-		}
-		if _, err := os.Stat(target); err == nil {
-			return errors.New("target already exists")
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -1039,7 +1529,11 @@ func (s *Store) ListFiles(rel string) ([]domain.FileEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.listFilesInRoot(root, rel)
+	files, err := s.listFilesInRoot(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	return s.applyFileMetadata("local", files), nil
 }
 
 func (s *Store) ListSourceFilesForAdmin(storageKey, rel string) ([]domain.FileEntry, error) {
@@ -1052,14 +1546,16 @@ func (s *Store) ListSourceFilesForAdmin(storageKey, rel string) ([]domain.FileEn
 		if err != nil {
 			return nil, err
 		}
-		return s.applyFileListRules(fileListRuleContext{Source: source}, files), nil
+		files = s.applyFileListRules(fileListRuleContext{Source: source}, files)
+		return s.applyFileMetadata(storageKey, files), nil
 	}
 	if source.Type == "webdav" {
 		files, err := s.listWebDAVFiles(source, rel)
 		if err != nil {
 			return nil, err
 		}
-		return s.applyFileListRules(fileListRuleContext{Source: source}, files), nil
+		files = s.applyFileListRules(fileListRuleContext{Source: source}, files)
+		return s.applyFileMetadata(storageKey, files), nil
 	}
 	_, root, err := s.sourceRoot(storageKey, false)
 	if err != nil {
@@ -1069,7 +1565,8 @@ func (s *Store) ListSourceFilesForAdmin(storageKey, rel string) ([]domain.FileEn
 	if err != nil {
 		return nil, err
 	}
-	return s.applyFileListRules(fileListRuleContext{Source: source}, files), nil
+	files = s.applyFileListRules(fileListRuleContext{Source: source}, files)
+	return s.applyFileMetadata(storageKey, files), nil
 }
 
 func (s *Store) listFilesInRoot(rootPath, rel string) ([]domain.FileEntry, error) {
@@ -1105,7 +1602,12 @@ func (s *Store) listFilesInRoot(rootPath, rel string) ([]domain.FileEntry, error
 }
 
 func (s *Store) SearchFiles(query string, limit int) ([]domain.FileEntry, error) {
-	return s.searchFilesInRoot(s.cfg.FilesDir, query, limit)
+	files, err := s.searchFilesInRoot(s.cfg.FilesDir, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	files = s.applyFileMetadata("local", files)
+	return s.includeMetadataSearchMatches("local", query, limit, files)
 }
 
 func (s *Store) SearchSourceFiles(storageKey, query string, limit int) ([]domain.FileEntry, error) {
@@ -1114,16 +1616,31 @@ func (s *Store) SearchSourceFiles(storageKey, query string, limit int) ([]domain
 		return nil, err
 	}
 	if objectStorageType(source.Type) {
-		return s.searchS3Files(source, query, limit)
+		files, err := s.searchS3Files(source, query, limit)
+		if err != nil {
+			return nil, err
+		}
+		files = s.applyFileMetadata(storageKey, files)
+		return s.includeMetadataSearchMatches(storageKey, query, limit, files)
 	}
 	if source.Type == "webdav" {
-		return s.searchWebDAVFiles(source, query, limit)
+		files, err := s.searchWebDAVFiles(source, query, limit)
+		if err != nil {
+			return nil, err
+		}
+		files = s.applyFileMetadata(storageKey, files)
+		return s.includeMetadataSearchMatches(storageKey, query, limit, files)
 	}
 	_, root, err := s.sourceRoot(storageKey, false)
 	if err != nil {
 		return nil, err
 	}
-	return s.searchFilesInRoot(root, query, limit)
+	files, err := s.searchFilesInRoot(root, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	files = s.applyFileMetadata(storageKey, files)
+	return s.includeMetadataSearchMatches(storageKey, query, limit, files)
 }
 
 func (s *Store) searchFilesInRoot(rootText, query string, limit int) ([]domain.FileEntry, error) {
@@ -1239,6 +1756,118 @@ func (s *Store) UploadSourceFile(storageKey, dirRel, filename string, reader io.
 	default:
 		return "", errors.New("storage adapter is not implemented yet")
 	}
+}
+
+func (s *Store) SaveSourceTextFile(storageKey, rel, content string) (domain.FileEntry, error) {
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	clean, err := cleanRelative(rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if clean == "" {
+		return domain.FileEntry{}, errors.New("file path is required")
+	}
+	if strings.HasSuffix(filepath.ToSlash(strings.TrimSpace(rel)), "/") {
+		return domain.FileEntry{}, errors.New("file name is required")
+	}
+	name := pathBase(clean)
+	if !editableTextExtension(name) {
+		return domain.FileEntry{}, errors.New("file type is not editable as text")
+	}
+	if err := s.uploadRulesAllowed(clean, name); err != nil {
+		return domain.FileEntry{}, err
+	}
+
+	switch source.Type {
+	case "local":
+		root, err := s.sourceSafePath(source, "")
+		if err != nil {
+			return domain.FileEntry{}, err
+		}
+		return saveTextFileInRoot(root, clean, content)
+	case "s3", "aliyun_oss", "tencent_cos":
+		download, err := s.SourceDownload(storageKey, clean, false)
+		if err != nil {
+			return domain.FileEntry{}, err
+		}
+		_ = download.Reader.Close()
+		if download.Entry.Type != "file" {
+			return domain.FileEntry{}, errors.New("target is not a file")
+		}
+		if err := s.putS3Object(source, clean, strings.NewReader(content), int64(len(content))); err != nil {
+			return domain.FileEntry{}, err
+		}
+		return domain.FileEntry{Name: name, Path: clean, Type: "file", Size: int64(len(content)), ModifiedAt: time.Now().Format(time.RFC3339)}, nil
+	case "webdav":
+		download, err := s.SourceDownload(storageKey, clean, false)
+		if err != nil {
+			return domain.FileEntry{}, err
+		}
+		_ = download.Reader.Close()
+		if download.Entry.Type != "file" {
+			return domain.FileEntry{}, errors.New("target is not a file")
+		}
+		if err := s.putWebDAVFile(source, clean, strings.NewReader(content)); err != nil {
+			return domain.FileEntry{}, err
+		}
+		return domain.FileEntry{Name: name, Path: clean, Type: "file", Size: int64(len(content)), ModifiedAt: time.Now().Format(time.RFC3339)}, nil
+	default:
+		return domain.FileEntry{}, errors.New("storage adapter is not implemented yet")
+	}
+}
+
+func saveTextFileInRoot(root, rel, content string) (domain.FileEntry, error) {
+	target, err := safePathInRoot(root, rel)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if info.IsDir() {
+		return domain.FileEntry{}, errors.New("target is not a file")
+	}
+	if err := os.WriteFile(target, []byte(content), info.Mode().Perm()); err != nil {
+		return domain.FileEntry{}, err
+	}
+	updated, err := os.Stat(target)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	return fileInfoEntry(rel, updated), nil
+}
+
+var editableTextExtensions = map[string]bool{
+	"css":  true,
+	"csv":  true,
+	"env":  true,
+	"go":   true,
+	"html": true,
+	"ini":  true,
+	"js":   true,
+	"json": true,
+	"log":  true,
+	"md":   true,
+	"scss": true,
+	"sql":  true,
+	"svg":  true,
+	"text": true,
+	"toml": true,
+	"ts":   true,
+	"txt":  true,
+	"vue":  true,
+	"xml":  true,
+	"yaml": true,
+	"yml":  true,
+}
+
+func editableTextExtension(filename string) bool {
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
+	return editableTextExtensions[ext]
 }
 
 func (s *Store) CreateFolder(rel string) (domain.FileEntry, error) {
@@ -1369,21 +1998,57 @@ func (s *Store) MoveFile(from, to string) (domain.FileEntry, error) {
 }
 
 func (s *Store) MoveSourceFile(storageKey, from, to string) (domain.FileEntry, error) {
+	storageKey = storageKeyOrDefault(storageKey)
 	source, err := s.availableSource(storageKey, false)
 	if err != nil {
 		return domain.FileEntry{}, err
 	}
+	var entry domain.FileEntry
 	if objectStorageType(source.Type) {
-		return s.moveS3Object(source, from, to)
+		entry, err = s.moveS3Object(source, from, to)
+	} else if source.Type == "webdav" {
+		entry, err = s.moveWebDAVPath(source, from, to)
+	} else {
+		var root string
+		_, root, err = s.sourceRoot(storageKey, false)
+		if err == nil {
+			entry, err = s.moveFileInRoot(root, from, to)
+		}
 	}
-	if source.Type == "webdav" {
-		return s.moveWebDAVPath(source, from, to)
-	}
-	_, root, err := s.sourceRoot(storageKey, false)
 	if err != nil {
 		return domain.FileEntry{}, err
 	}
-	return s.moveFileInRoot(root, from, to)
+	if err := s.moveFileMetadata(storageKey, from, to); err != nil {
+		return domain.FileEntry{}, err
+	}
+	return s.applyFileMetadata(storageKey, []domain.FileEntry{entry})[0], nil
+}
+
+func (s *Store) CopySourceFile(storageKey, from, to string) (domain.FileEntry, error) {
+	storageKey = storageKeyOrDefault(storageKey)
+	source, err := s.availableSource(storageKey, false)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	var entry domain.FileEntry
+	if objectStorageType(source.Type) {
+		entry, err = s.copyS3Object(source, from, to)
+	} else if source.Type == "webdav" {
+		entry, err = s.copyWebDAVPath(source, from, to)
+	} else {
+		var root string
+		_, root, err = s.sourceRoot(storageKey, false)
+		if err == nil {
+			entry, err = s.copyFileInRoot(root, from, to)
+		}
+	}
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if err := s.copyFileMetadata(storageKey, from, to); err != nil {
+		return domain.FileEntry{}, err
+	}
+	return s.applyFileMetadata(storageKey, []domain.FileEntry{entry})[0], nil
 }
 
 func (s *Store) moveFileInRoot(root, from, to string) (domain.FileEntry, error) {
@@ -1429,6 +2094,95 @@ func (s *Store) moveFileInRoot(root, from, to string) (domain.FileEntry, error) 
 	}, nil
 }
 
+func (s *Store) copyFileInRoot(root, from, to string) (domain.FileEntry, error) {
+	source, err := safePathInRoot(root, from)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	target, err := safePathInRoot(root, to)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+		return domain.FileEntry{}, errors.New("source and target paths are required")
+	}
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if _, err := os.Stat(target); err == nil {
+		return domain.FileEntry{}, errors.New("target already exists")
+	}
+	if sourceInfo.IsDir() {
+		if strings.HasPrefix(target+string(os.PathSeparator), source+string(os.PathSeparator)) {
+			return domain.FileEntry{}, errors.New("cannot copy a directory into itself")
+		}
+		if err := copyDir(source, target); err != nil {
+			return domain.FileEntry{}, err
+		}
+	} else if err := copyFile(source, target, sourceInfo.Mode()); err != nil {
+		return domain.FileEntry{}, err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	entryType := "file"
+	size := info.Size()
+	if info.IsDir() {
+		entryType = "folder"
+		size = 0
+	}
+	return domain.FileEntry{
+		Name:       filepath.Base(target),
+		Path:       strings.Trim(filepath.ToSlash(to), "/"),
+		Type:       entryType,
+		Size:       size,
+		ModifiedAt: info.ModTime().Format(time.RFC3339),
+	}, nil
+}
+
+func copyDir(source, target string) error {
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		dest := filepath.Join(target, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(dest, info.Mode())
+		}
+		return copyFile(path, dest, info.Mode())
+	})
+}
+
+func copyFile(source, target string, mode fs.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 func (s *Store) DeleteFile(rel string) error {
 	root, err := s.safePath("")
 	if err != nil {
@@ -1438,21 +2192,26 @@ func (s *Store) DeleteFile(rel string) error {
 }
 
 func (s *Store) DeleteSourceFile(storageKey, rel string) error {
+	storageKey = storageKeyOrDefault(storageKey)
 	source, err := s.availableSource(storageKey, false)
 	if err != nil {
 		return err
 	}
 	if objectStorageType(source.Type) {
-		return s.deleteS3Object(source, rel)
+		err = s.deleteS3Object(source, rel)
+	} else if source.Type == "webdav" {
+		err = s.deleteWebDAVPath(source, rel)
+	} else {
+		var root string
+		_, root, err = s.sourceRoot(storageKey, false)
+		if err == nil {
+			err = s.deleteFileInRoot(root, rel)
+		}
 	}
-	if source.Type == "webdav" {
-		return s.deleteWebDAVPath(source, rel)
-	}
-	_, root, err := s.sourceRoot(storageKey, false)
 	if err != nil {
 		return err
 	}
-	return s.deleteFileInRoot(root, rel)
+	return s.deleteFileMetadataTree(storageKey, rel)
 }
 
 func (s *Store) deleteFileInRoot(root, rel string) error {
@@ -1532,13 +2291,21 @@ func (s *Store) Dashboard() (domain.Dashboard, error) {
 }
 
 func (s *Store) CreateShare(path string, expiresAt string, password string) (domain.Share, error) {
+	return s.CreateShareWithToken(path, expiresAt, password, "")
+}
+
+func (s *Store) CreateShareWithToken(path string, expiresAt string, password string, token string) (domain.Share, error) {
 	if _, err := s.safePath(path); err != nil {
 		return domain.Share{}, err
 	}
 	if err := s.ensurePublicPath(path); err != nil {
 		return domain.Share{}, err
 	}
-	token, err := randomToken()
+	expiresAt, err := normalizeShareExpiresAt(expiresAt)
+	if err != nil {
+		return domain.Share{}, err
+	}
+	token, err = s.normalizeShareToken(token)
 	if err != nil {
 		return domain.Share{}, err
 	}
@@ -1548,6 +2315,44 @@ func (s *Store) CreateShare(path string, expiresAt string, password string) (dom
 	}
 	id, _ := res.LastInsertId()
 	return domain.Share{ID: id, Token: token, Path: path, URL: "/s/" + token, Protected: strings.TrimSpace(password) != "", ExpiresAt: expiresAt, CreatedAt: time.Now().Format(time.RFC3339)}, nil
+}
+
+func (s *Store) normalizeShareToken(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return randomToken()
+	}
+	if !shareTokenPattern.MatchString(value) {
+		return "", errors.New("share key must be 4-64 letters, numbers, underscores, or dashes")
+	}
+	var existing int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM shares WHERE token = ?`, value).Scan(&existing)
+	if err != nil {
+		return "", err
+	}
+	if existing > 0 {
+		return "", errors.New("share key already exists")
+	}
+	return value, nil
+}
+
+func normalizeShareExpiresAt(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	}
+	for _, format := range formats {
+		if parsed, err := time.Parse(format, value); err == nil {
+			return dbTime(parsed), nil
+		}
+	}
+	return "", errors.New("share expiration time is invalid")
 }
 
 func (s *Store) Shares() ([]domain.Share, error) {
@@ -1575,12 +2380,20 @@ func (s *Store) DeleteShare(id int64) error {
 	return err
 }
 
+func (s *Store) DeleteExpiredShares() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM shares WHERE expires_at IS NOT NULL AND expires_at != '' AND datetime(expires_at) <= CURRENT_TIMESTAMP`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) ResolveShare(token string, password string) (domain.Share, error) {
 	var share domain.Share
 	var storedPassword string
 	err := s.db.QueryRow(`SELECT id, token, path, COALESCE(password, ''), COALESCE(expires_at, ''), view_count, download_count, COALESCE(last_access_at, ''), created_at
 		FROM shares
-		WHERE token = ? AND (expires_at IS NULL OR expires_at = '' OR expires_at > CURRENT_TIMESTAMP)`, token).
+		WHERE token = ? AND (expires_at IS NULL OR expires_at = '' OR datetime(expires_at) > CURRENT_TIMESTAMP)`, token).
 		Scan(&share.ID, &share.Token, &share.Path, &storedPassword, &share.ExpiresAt, &share.ViewCount, &share.DownloadCount, &share.LastAccessAt, &share.CreatedAt)
 	if err != nil {
 		return domain.Share{}, err
@@ -1589,7 +2402,7 @@ func (s *Store) ResolveShare(token string, password string) (domain.Share, error
 		return domain.Share{}, err
 	}
 	if storedPassword != "" && !verifySharePassword(storedPassword, password) {
-		return domain.Share{}, errors.New("invalid share password")
+		return domain.Share{}, ErrInvalidSharePassword
 	}
 	share.URL = "/s/" + share.Token
 	share.Protected = storedPassword != ""
@@ -1641,6 +2454,7 @@ func (s *Store) ShareDetail(token string, password string, child string) (domain
 	}
 	entryType := "file"
 	size := info.Size()
+	entry := s.applyFileMetadata("local", []domain.FileEntry{fileInfoEntry(currentRel, info)})[0]
 	files := make([]domain.FileEntry, 0)
 	if info.IsDir() {
 		entryType = "folder"
@@ -1658,6 +2472,7 @@ func (s *Store) ShareDetail(token string, password string, child string) (domain
 		Name:        info.Name(),
 		Type:        entryType,
 		Size:        size,
+		Description: entry.Description,
 		Protected:   share.Protected,
 		ExpiresAt:   share.ExpiresAt,
 		CreatedAt:   share.CreatedAt,
@@ -1701,7 +2516,7 @@ func (s *Store) SharedFilePath(token, password, child string) (domain.Share, str
 
 func (s *Store) ShareCount() (int, error) {
 	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM shares`).Scan(&count)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM shares WHERE expires_at IS NULL OR expires_at = '' OR datetime(expires_at) > CURRENT_TIMESTAMP`).Scan(&count)
 	return count, err
 }
 
@@ -1838,6 +2653,88 @@ func (s *Store) SearchAccessLogs(page, pageSize int, action, path, ip, userAgent
 		return domain.AccessLogPage{}, err
 	}
 	return domain.AccessLogPage{Items: logs, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func (s *Store) LinkAnalytics() (domain.LinkAnalytics, error) {
+	shareVisits, err := s.accessLogsForActions([]string{"share-view", "share-download", "share-password-failed", "share-password-rate-limited"}, 20)
+	if err != nil {
+		return domain.LinkAnalytics{}, err
+	}
+	directLinkAccesses, err := s.accessLogsForActions([]string{"direct"}, 20)
+	if err != nil {
+		return domain.LinkAnalytics{}, err
+	}
+	downloadRanking, err := s.downloadRanking(10)
+	if err != nil {
+		return domain.LinkAnalytics{}, err
+	}
+	return domain.LinkAnalytics{
+		ShareVisits:        shareVisits,
+		DownloadRanking:    downloadRanking,
+		DirectLinkAccesses: directLinkAccesses,
+	}, nil
+}
+
+func (s *Store) accessLogsForActions(actions []string, limit int) ([]domain.AccessLog, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	placeholders := make([]string, len(actions))
+	args := make([]any, 0, len(actions)+1)
+	for index, action := range actions {
+		placeholders[index] = "?"
+		args = append(args, action)
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query(`SELECT id, action, path, ip, user_agent, created_at
+		FROM access_logs
+		WHERE action IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY created_at DESC, id DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	logs := make([]domain.AccessLog, 0)
+	for rows.Next() {
+		var log domain.AccessLog
+		if err := rows.Scan(&log.ID, &log.Action, &log.Path, &log.IP, &log.UserAgent, &log.CreatedAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, log)
+	}
+	return logs, rows.Err()
+}
+
+func (s *Store) downloadRanking(limit int) ([]domain.PathMetric, error) {
+	if limit < 1 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`SELECT path, COUNT(*) AS total, MAX(created_at) AS last_access_at
+		FROM access_logs
+		WHERE action IN ('download', 'public-download', 'share-download', 'archive-download', 'direct') AND path != ''
+		GROUP BY path
+		ORDER BY total DESC, last_access_at DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ranking := make([]domain.PathMetric, 0)
+	for rows.Next() {
+		var metric domain.PathMetric
+		if err := rows.Scan(&metric.Path, &metric.Count, &metric.LastAccessAt); err != nil {
+			return nil, err
+		}
+		ranking = append(ranking, metric)
+	}
+	return ranking, rows.Err()
 }
 
 func (s *Store) DeleteAccessLogs(olderThanDays int, all bool) (int64, error) {
@@ -2489,21 +3386,8 @@ func (s *Store) s3UploadAllowed(source domain.StorageSource, dirRel, filename st
 	if _, err := cleanRelative(targetRel); err != nil {
 		return err
 	}
-	if denyList := s.SettingValue("uploadPathDenyList", ""); pathMatchesRules(targetRel, denyList) {
-		return errors.New("upload path is denied")
-	}
-	if allowList := strings.TrimSpace(s.SettingValue("uploadPathAllowList", "")); allowList != "" && !pathMatchesRules(targetRel, allowList) {
-		return errors.New("upload path is not allowed")
-	}
-	ext := strings.ToLower(filepath.Ext(filename))
-	if ext == "" {
-		ext = "(none)"
-	}
-	if extensionInList(ext, s.SettingValue("uploadDenyExtensions", "")) {
-		return errors.New("file extension is denied")
-	}
-	if allowList := strings.TrimSpace(s.SettingValue("uploadAllowExtensions", "")); allowList != "" && !extensionInList(ext, allowList) {
-		return errors.New("file extension is not allowed")
+	if err := s.uploadRulesAllowed(targetRel, filename); err != nil {
+		return err
 	}
 	if s.SettingValue("uploadOverwrite", "enabled") == "enabled" {
 		return nil
@@ -2619,6 +3503,38 @@ func (s *Store) moveS3Object(source domain.StorageSource, from, to string) (doma
 	return s3EntryFromObject(cfg, info), nil
 }
 
+func (s *Store) copyS3Object(source domain.StorageSource, from, to string) (domain.FileEntry, error) {
+	client, cfg, err := s.s3Client(source)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	fromKey, err := s3ObjectKey(cfg, from)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toClean, err := cleanRelative(to)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toKey, err := s3ObjectKey(cfg, toClean)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	info, err := client.StatObject(context.Background(), cfg.Bucket, fromKey, minio.StatObjectOptions{})
+	if err != nil {
+		return s.copyS3Prefix(client, cfg, from, to)
+	}
+	if _, err = client.CopyObject(
+		context.Background(),
+		minio.CopyDestOptions{Bucket: cfg.Bucket, Object: toKey},
+		minio.CopySrcOptions{Bucket: cfg.Bucket, Object: fromKey},
+	); err != nil {
+		return domain.FileEntry{}, err
+	}
+	info.Key = toKey
+	return s3EntryFromObject(cfg, info), nil
+}
+
 func (s *Store) moveS3Prefix(client *minio.Client, cfg s3SourceConfig, from, to string) (domain.FileEntry, error) {
 	fromPrefix, err := s3ListPrefix(cfg, from)
 	if err != nil {
@@ -2654,6 +3570,44 @@ func (s *Store) moveS3Prefix(client *minio.Client, cfg s3SourceConfig, from, to 
 		moved++
 	}
 	if moved == 0 {
+		return domain.FileEntry{}, errors.New("source does not exist")
+	}
+	now := time.Now().Format(time.RFC3339)
+	return domain.FileEntry{Name: pathBase(toClean), Path: toClean, Type: "folder", Size: 0, ModifiedAt: now}, nil
+}
+
+func (s *Store) copyS3Prefix(client *minio.Client, cfg s3SourceConfig, from, to string) (domain.FileEntry, error) {
+	fromPrefix, err := s3ListPrefix(cfg, from)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toClean, err := cleanRelative(to)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toPrefix, err := s3ListPrefix(cfg, toClean)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	if fromPrefix == "" || toPrefix == "" {
+		return domain.FileEntry{}, errors.New("source and target paths are required")
+	}
+	copied := 0
+	for object := range client.ListObjects(context.Background(), cfg.Bucket, minio.ListObjectsOptions{Prefix: fromPrefix, Recursive: true}) {
+		if object.Err != nil {
+			return domain.FileEntry{}, object.Err
+		}
+		targetKey := toPrefix + strings.TrimPrefix(object.Key, fromPrefix)
+		if _, err := client.CopyObject(
+			context.Background(),
+			minio.CopyDestOptions{Bucket: cfg.Bucket, Object: targetKey},
+			minio.CopySrcOptions{Bucket: cfg.Bucket, Object: object.Key},
+		); err != nil {
+			return domain.FileEntry{}, err
+		}
+		copied++
+	}
+	if copied == 0 {
 		return domain.FileEntry{}, errors.New("source does not exist")
 	}
 	now := time.Now().Format(time.RFC3339)
@@ -2929,21 +3883,8 @@ func (s *Store) webDAVUploadAllowed(source domain.StorageSource, dirRel, filenam
 	if _, err := cleanRelative(targetRel); err != nil {
 		return err
 	}
-	if denyList := s.SettingValue("uploadPathDenyList", ""); pathMatchesRules(targetRel, denyList) {
-		return errors.New("upload path is denied")
-	}
-	if allowList := strings.TrimSpace(s.SettingValue("uploadPathAllowList", "")); allowList != "" && !pathMatchesRules(targetRel, allowList) {
-		return errors.New("upload path is not allowed")
-	}
-	ext := strings.ToLower(filepath.Ext(filename))
-	if ext == "" {
-		ext = "(none)"
-	}
-	if extensionInList(ext, s.SettingValue("uploadDenyExtensions", "")) {
-		return errors.New("file extension is denied")
-	}
-	if allowList := strings.TrimSpace(s.SettingValue("uploadAllowExtensions", "")); allowList != "" && !extensionInList(ext, allowList) {
-		return errors.New("file extension is not allowed")
+	if err := s.uploadRulesAllowed(targetRel, filename); err != nil {
+		return err
 	}
 	if s.SettingValue("uploadOverwrite", "enabled") == "enabled" {
 		return nil
@@ -3046,6 +3987,33 @@ func (s *Store) moveWebDAVPath(source domain.StorageSource, from, to string) (do
 	return domain.FileEntry{Name: pathBase(toClean), Path: toClean, Type: "file", Size: 0, ModifiedAt: time.Now().Format(time.RFC3339)}, nil
 }
 
+func (s *Store) copyWebDAVPath(source domain.StorageSource, from, to string) (domain.FileEntry, error) {
+	fromClean, err := cleanRelative(from)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	toClean, err := cleanRelative(to)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	destination, _, err := s.webDAVURL(source, toClean)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	res, err := s.webDAVRequest(source, "COPY", fromClean, nil, map[string]string{
+		"Destination": destination,
+		"Overwrite":   "F",
+	})
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	defer res.Body.Close()
+	if !webDAVSuccess(res.StatusCode) {
+		return domain.FileEntry{}, errors.New(res.Status)
+	}
+	return domain.FileEntry{Name: pathBase(toClean), Path: toClean, Type: "file", Size: 0, ModifiedAt: time.Now().Format(time.RFC3339)}, nil
+}
+
 func (s *Store) deleteWebDAVPath(source domain.StorageSource, rel string) error {
 	clean, err := cleanRelative(rel)
 	if err != nil {
@@ -3121,6 +4089,14 @@ func cleanRelative(rel string) (string, error) {
 		return "", errors.New("invalid path")
 	}
 	return filepath.ToSlash(clean), nil
+}
+
+func storageKeyOrDefault(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "local"
+	}
+	return value
 }
 
 func nullable(value string) any {

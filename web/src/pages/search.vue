@@ -107,7 +107,7 @@ async function createDirectLink(file: FileEntry) {
       </el-button>
     </section>
 
-    <section class="search-console" v-loading="loading">
+    <section v-loading="loading" class="search-console">
       <div class="search-command">
         <el-input
           v-model="keyword"
@@ -133,13 +133,18 @@ async function createDirectLink(file: FileEntry) {
       >
         <el-table-column label="名称" min-width="260">
           <template #default="{ row }">
-            <button class="file-name" @click="openFile(row)">
-              <el-icon>
-                <Folder v-if="row.type === 'folder'" />
-                <Document v-else />
-              </el-icon>
-              <span>{{ row.name }}</span>
-            </button>
+            <div class="file-title-cell">
+              <button class="file-name" @click="openFile(row)">
+                <el-icon>
+                  <Folder v-if="row.type === 'folder'" />
+                  <Document v-else />
+                </el-icon>
+                <span>{{ row.name }}</span>
+              </button>
+              <p v-if="row.description" class="file-description">
+                {{ row.description }}
+              </p>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="路径" min-width="280">

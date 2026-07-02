@@ -1,4 +1,5 @@
 <script lang="ts" setup>
+import type { AuthMe } from '~/api'
 import {
   Connection,
   DataLine,
@@ -13,6 +14,20 @@ import {
   Upload,
   UserFilled,
 } from '@element-plus/icons-vue'
+import { computed, onMounted, ref } from 'vue'
+import { api } from '~/api'
+
+const me = ref<AuthMe>()
+const canManageSystem = computed(() => me.value?.user?.role === 'super_admin')
+
+onMounted(async () => {
+  try {
+    me.value = await api<AuthMe>('/api/auth/me', { skipAuthRedirect: true })
+  }
+  catch {
+    me.value = undefined
+  }
+})
 </script>
 
 <template>
@@ -42,37 +57,37 @@ import {
           直链 / 短链
         </template>
       </el-menu-item>
-      <el-menu-item index="/storage">
+      <el-menu-item v-if="canManageSystem" index="/storage">
         <el-icon><Management /></el-icon>
         <template #title>
           存储源
         </template>
       </el-menu-item>
-      <el-menu-item index="/webdav">
+      <el-menu-item v-if="canManageSystem" index="/webdav">
         <el-icon><Connection /></el-icon>
         <template #title>
           WebDAV
         </template>
       </el-menu-item>
-      <el-menu-item index="/rules">
+      <el-menu-item v-if="canManageSystem" index="/rules">
         <el-icon><Operation /></el-icon>
         <template #title>
           规则管理
         </template>
       </el-menu-item>
-      <el-menu-item index="/uploads">
+      <el-menu-item v-if="canManageSystem" index="/uploads">
         <el-icon><Upload /></el-icon>
         <template #title>
           上传规则
         </template>
       </el-menu-item>
-      <el-menu-item index="/access">
+      <el-menu-item v-if="canManageSystem" index="/access">
         <el-icon><Lock /></el-icon>
         <template #title>
           访问控制
         </template>
       </el-menu-item>
-      <el-menu-item index="/users">
+      <el-menu-item v-if="canManageSystem" index="/users">
         <el-icon><UserFilled /></el-icon>
         <template #title>
           用户管理
@@ -84,7 +99,7 @@ import {
           访问日志
         </template>
       </el-menu-item>
-      <el-menu-item index="/settings">
+      <el-menu-item v-if="canManageSystem" index="/settings">
         <el-icon><Setting /></el-icon>
         <template #title>
           系统设置

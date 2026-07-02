@@ -10,6 +10,10 @@ import { defineConfig } from 'vite'
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  optimizeDeps: {
+    exclude: ['vue', 'vue-router', '@vue-office/docx', '@vue-office/excel', '@vue-office/pptx'],
+  },
+
   server: {
     proxy: {
       '/api': 'http://localhost:3008',

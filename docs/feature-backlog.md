@@ -25,24 +25,24 @@ This file tracks remaining file-service features while keeping XFile's own UI st
 - [x] Assign users to storage sources.
 - [x] Assign users to root paths within a storage source.
 - [x] Add per-user operation permissions.
-- [ ] Add user enable / disable status.
-- [ ] Add clearer admin versus normal user behavior.
+- [x] Add user enable / disable status.
+- [x] Add clearer admin versus normal user behavior.
 
 ## Phase 4 - Batch Operations
 
-- [ ] Batch move.
-- [ ] Batch copy.
-- [ ] Batch share.
-- [ ] Batch direct-link generation.
-- [ ] ZIP archive download for folders and selected files.
+- [x] Batch move.
+- [x] Batch copy.
+- [x] Batch share.
+- [x] Batch direct-link generation.
+- [x] ZIP archive download for folders and selected files.
 
 ## Phase 5 - Preview And Editing
 
-- [ ] Text file editing and save.
-- [ ] File descriptions / metadata notes.
-- [ ] Office preview integration.
-- [ ] Optional kkFileView / OnlyOffice integration.
-- [ ] More robust media preview behavior.
+- [x] Text file editing and save.
+- [x] File descriptions / metadata notes.
+- [x] Office preview integration.
+- [x] Optional kkFileView / OnlyOffice integration.
+- [x] More robust media preview behavior.
 
 ## Phase 6 - WebDAV Server
 
@@ -54,24 +54,24 @@ This file tracks remaining file-service features while keeping XFile's own UI st
 
 ## Phase 7 - Security
 
-- [ ] Login rate limiting.
-- [ ] CSRF protection for mutating requests.
-- [ ] Share password attempt limiting.
-- [ ] Session management and forced logout.
-- [ ] Optional 2FA or captcha.
+- [x] Login rate limiting.
+- [x] CSRF protection for mutating requests.
+- [x] Share password attempt limiting.
+- [x] Session management and forced logout.
+- [x] Optional 2FA or captcha.
 
 ## Phase 8 - Share And Link Analytics
 
-- [ ] Share visit details.
-- [ ] Download ranking.
-- [ ] Expired link cleanup.
-- [ ] Custom share keys.
-- [ ] More detailed direct-link access stats.
+- [x] Share visit details.
+- [x] Download ranking.
+- [x] Expired link cleanup.
+- [x] Custom share keys.
+- [x] More detailed direct-link access stats.
 
 ## Phase 9 - Frontend Polish
 
 - [ ] Drag-and-drop upload.
 - [ ] Keyboard multi-select.
 - [ ] Empty-area context menu coverage on all file views.
-- [ ] Move / copy target picker.
+- [x] Move / copy target picker.
 - [ ] Mobile layout QA for every admin page.

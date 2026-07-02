@@ -23,11 +23,11 @@ const form = reactive({
 })
 
 const origin = computed(() => window.location.origin)
-const davUrl = computed(() => `${origin.value}${normalizedMountPath.value}`)
 const normalizedMountPath = computed(() => {
   const value = form.webdavMountPath.trim() || '/dav'
   return value.startsWith('/') ? value : `/${value}`
 })
+const davUrl = computed(() => `${origin.value}${normalizedMountPath.value}`)
 const isEnabled = computed(() => form.webdav === 'enabled')
 
 async function loadSettings() {
@@ -77,7 +77,7 @@ onMounted(loadSettings)
 </script>
 
 <template>
-  <div class="workspace" v-loading="loading">
+  <div v-loading="loading" class="workspace">
     <section class="overview-band">
       <div>
         <p class="eyebrow">

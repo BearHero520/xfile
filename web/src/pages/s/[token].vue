@@ -106,7 +106,7 @@ onMounted(loadShare)
 </script>
 
 <template>
-  <main class="share-page" v-loading="loading">
+  <main v-loading="loading" class="share-page">
     <section class="share-shell">
       <header class="share-topbar">
         <span class="brand-mark">XF</span>
@@ -115,7 +115,9 @@ onMounted(loadShare)
 
       <template v-if="locked">
         <section class="share-state-panel">
-          <el-icon class="share-hero-icon"><Lock /></el-icon>
+          <el-icon class="share-hero-icon">
+            <Lock />
+          </el-icon>
           <h1>受保护的分享</h1>
           <p class="lede">
             输入分享密码后查看文件详情。
@@ -153,6 +155,9 @@ onMounted(loadShare)
               <h1>{{ detail.name }}</h1>
               <p class="lede">
                 创建于 {{ formatTime(detail.createdAt) }}
+              </p>
+              <p v-if="detail.description" class="share-description">
+                {{ detail.description }}
               </p>
             </div>
           </div>
@@ -192,18 +197,23 @@ onMounted(loadShare)
           <el-table class="share-file-table" :data="detail.files || []" empty-text="文件夹为空">
             <el-table-column label="名称" min-width="260">
               <template #default="{ row }">
-                <button v-if="row.type === 'folder'" class="file-name" @click="openFolder(row.path)">
-                  <el-icon>
-                    <Folder />
-                  </el-icon>
-                  <span>{{ row.name }}</span>
-                </button>
-                <span v-else class="file-name">
-                  <el-icon>
-                    <Document />
-                  </el-icon>
-                  <span>{{ row.name }}</span>
-                </span>
+                <div class="file-title-cell">
+                  <button v-if="row.type === 'folder'" class="file-name" @click="openFolder(row.path)">
+                    <el-icon>
+                      <Folder />
+                    </el-icon>
+                    <span>{{ row.name }}</span>
+                  </button>
+                  <span v-else class="file-name">
+                    <el-icon>
+                      <Document />
+                    </el-icon>
+                    <span>{{ row.name }}</span>
+                  </span>
+                  <p v-if="row.description" class="file-description">
+                    {{ row.description }}
+                  </p>
+                </div>
               </template>
             </el-table-column>
             <el-table-column class-name="share-secondary-column" label="大小" width="120">
@@ -228,7 +238,9 @@ onMounted(loadShare)
 
       <template v-else>
         <section class="share-state-panel">
-          <el-icon class="share-hero-icon"><Share /></el-icon>
+          <el-icon class="share-hero-icon">
+            <Share />
+          </el-icon>
           <h1>分享不存在</h1>
           <p class="lede">
             链接可能已过期或被删除。

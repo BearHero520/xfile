@@ -1,0 +1,23 @@
+.vite-ssg-temp
+
+node_modules
+web/node_modules
+.DS_Store
+dist
+web/dist
+dist-ssr
+web/dist-ssr
+*.local
+data
+
+# lock
+yarn.lock
+package-lock.json
+
+*.log
+*.tsbuildinfo
+.codex-run
+.codex-qa/runtime/
+.codex-qa/*.exe
+xfile
+xfile.exe

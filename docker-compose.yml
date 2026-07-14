@@ -1,0 +1,11 @@
+services:
+  xfile:
+    build: .
+    image: xfile:local
+    ports:
+      - "3008:3008"
+    environment:
+      XFILE_SITE_NAME: XFile
+      XFILE_SESSION_SECRET: ${XFILE_SESSION_SECRET:-}
+    volumes:
+      - ./data:/app/data

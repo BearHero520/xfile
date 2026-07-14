@@ -1,0 +1,62 @@
+# XFile 设计与交互 QA
+
+## 结论
+
+- 未发现需要阻止交付的 P0/P1/P2 问题。
+- 文件浏览交互以 ZFile 为准，未采用生成图中的三栏工作台或右侧常驻检查器。
+- iOS 26 参考只用于蓝色主色、玻璃表面、圆角、阴影和层级关系。
+
+## 交互事实来源
+
+- `E:\工作台\zfile\img\file-list.png`
+- `E:\工作台\zfile\img\gallery.png`
+- `E:\工作台\zfile\img\view-setting.png`
+- `E:\工作台\zfile\src\main\java\im\zhaojun\zfile\module\config\model\request\UpdateViewSettingRequest.java`
+- `E:\工作台\zfile\src\main\java\im\zhaojun\zfile\module\config\model\result\FrontSiteConfigResult.java`
+
+## 视觉事实来源
+
+- `E:\工作台\xfile\docs\design\ios26-command-center.png`
+- 该图片不决定页面结构、信息架构或点击行为。
+
+## 实现证据
+
+- 桌面文件首页：`E:\工作台\xfile\.codex-qa\zfile-desktop-home.png`
+- 桌面显示设置：`E:\工作台\xfile\.codex-qa\zfile-desktop-display-settings.png`
+- 移动端文件预览：`E:\工作台\xfile\.codex-qa\zfile-mobile-preview.png`
+
+## 已验证交互
+
+- 顶部工具栏、搜索、公告、文档、刷新、上传、视图切换和存储源切换。
+- 根目录存储源行为、面包屑和返回上级。
+- 列表与画廊切换。
+- 桌面端单击选择、双击打开；移动端单击打开。
+- 多选批量操作栏。
+- 批量分享和批量直链处理全部选中项，并显示逐项复制结果。
+- 文件右键菜单。
+- 图片、文本、音视频和 PDF 预览弹层；没有右侧常驻检查器。
+- 新建文件夹、新建文件、上传、移动、复制、重命名、文件说明和删除入口。
+- 分享与直链入口遵循显示设置。
+- 后台导航采用 ZFile 的系统设置、链接与统计、规则与权限分类。
+- 显示设置保存后可持久化，已验证重新加载仍保持配置。
+- 桌面/移动布局、表格密度、点击方式、排序与加载设置均作用到文件页。
+- 公开文件夹分享使用相对分享路径，可继续进入嵌套目录。
+- 桌面和 390 x 844 移动视口无横向溢出。
+- 浏览器控制台无 warning/error。
+
+## 功能连通性
+
+- API 仅暴露 XFile `/api/v1` 版本化 REST 规范。
+- 分享和直链现在持久化 `storageKey`，不再固定使用 `local`。
+- 公共分享详情、分享下载和 `/open/{token}` 均通过当前存储适配器解析。
+- 新增第二存储源的分享、详情、内容下载、直链创建和直链下载回归测试。
+
+## 自动验证
+
+- `go test ./...`: passed
+- `pnpm typecheck`: passed
+- `pnpm lint`: passed
+- `pnpm build`: passed
+- 浏览器交互 QA: passed
+
+final result: passed

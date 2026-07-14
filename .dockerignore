@@ -1,0 +1,10 @@
+.git
+.github
+.codex-run
+node_modules
+web/node_modules
+dist
+web/dist
+data
+*.log
+*.local

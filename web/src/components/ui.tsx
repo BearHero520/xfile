@@ -4,6 +4,7 @@ import {
   SpinnerIos20Regular,
 } from "@fluentui/react-icons";
 import { useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export function Button({
   variant = "secondary",
@@ -160,9 +161,15 @@ export function Modal({
   bodyClassName?: string;
   onClose: () => void;
 }) {
+  const backdropRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
-    const close = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const backdrops = document.querySelectorAll(".modal-backdrop");
+      if (backdrops.item(backdrops.length - 1) === backdropRef.current)
+        onClose();
+    };
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     document.addEventListener("keydown", close);
@@ -172,8 +179,9 @@ export function Modal({
     };
   }, [open, onClose]);
   if (!open) return null;
-  return (
+  return createPortal(
     <div
+      ref={backdropRef}
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) => event.currentTarget === event.target && onClose()}
@@ -196,7 +204,8 @@ export function Modal({
         <div className={`modal-body ${bodyClassName}`}>{children}</div>
         {footer && <footer className="modal-footer">{footer}</footer>}
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -44,7 +44,23 @@ POST /api/v1/collaboration/shares
   "storageKey": "team-drive",
   "path": "docs/guide.pdf",
   "password": "",
-  "expiresAt": ""
+  "expiresAt": "",
+  "maxAccessCount": 0
+}
+```
+
+`password`、`expiresAt` 和 `maxAccessCount` 均为选填。`maxAccessCount`
+为 `0` 时不限制访问次数；设置为正整数时，每次打开分享根页面消耗一次，
+同一页面内继续浏览目录或下载不会重复计数。
+
+现有分享可通过以下接口补设或清除限制；空的 `expiresAt` 表示永久有效，
+`maxAccessCount` 为 `0` 表示不限次数。
+
+```json
+PATCH /api/v1/collaboration/shares/{id}
+{
+  "expiresAt": "2026-07-15T04:00:00Z",
+  "maxAccessCount": 10
 }
 ```
 

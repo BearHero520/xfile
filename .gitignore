@@ -18,6 +18,7 @@ package-lock.json
 *.tsbuildinfo
 .codex-run
 .codex-qa/runtime/
+.codex-qa/theme-preview-data*/
 .codex-qa/*.exe
 xfile
 xfile.exe

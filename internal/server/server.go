@@ -2,6 +2,8 @@ package server
 
 import (
 	"net/http"
+	"os"
+	"time"
 
 	"golang.org/x/net/webdav"
 	"xfile/internal/config"
@@ -18,6 +20,11 @@ type Server struct {
 	sharePasswords requestRateLimiter
 	captchas       captchaStore
 	davLocks       webdav.LockSystem
+	githubClient   *http.Client
+	githubAPIBase  string
+	githubRawBase  string
+	githubToken    string
+	about          aboutState
 }
 
 func New(cfg config.Config, appStore *store.Store) *Server {
@@ -27,6 +34,10 @@ func New(cfg config.Config, appStore *store.Store) *Server {
 		mux:           http.NewServeMux(),
 		sessionSecret: newSessionSecret(cfg.SessionSecret),
 		davLocks:      webdav.NewMemLS(),
+		githubClient:  &http.Client{Timeout: 12 * time.Second},
+		githubAPIBase: "https://api.github.com",
+		githubRawBase: "https://raw.githubusercontent.com",
+		githubToken:   os.Getenv("GITHUB_TOKEN"),
 	}
 	s.routes()
 	return s
@@ -38,10 +49,15 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) routes() {
 	// XFile API v1. The public contract is resource-oriented and deliberately
-	// independent from the upstream ZFile controller naming scheme.
+	// independent from implementation-specific controller naming schemes.
 	s.mux.HandleFunc("GET /api/v1/system/health", s.health)
+	s.mux.HandleFunc("GET /api/v1/system/about", s.private(s.aboutPage))
 	s.mux.HandleFunc("GET /api/v1/public/bootstrap", s.accessControlled(s.publicSite))
+	s.mux.HandleFunc("GET /api/v1/public/announcements", s.accessControlled(s.publicAnnouncements))
+	s.mux.HandleFunc("GET /api/v1/public/branding/logo", s.brandLogo)
+	s.mux.HandleFunc("GET /api/v1/public/branding/favicon", s.brandFavicon)
 	s.mux.HandleFunc("GET /api/v1/public/drives/{key}/entries", s.accessControlled(s.publicStorageFiles))
+	s.mux.HandleFunc("GET /api/v1/public/drives/{key}/entries/details", s.accessControlled(s.publicEntryDetails))
 	s.mux.HandleFunc("GET /api/v1/public/drives/{key}/content", s.publicLinkControlled(s.publicStorageDownload))
 	s.mux.HandleFunc("POST /api/v1/public/drives/{key}/archives", s.publicLinkControlled(s.publicStorageArchive))
 	s.mux.HandleFunc("GET /api/v1/public/shares/{token}", s.publicLinkControlled(s.publicShare))
@@ -55,6 +71,7 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /api/v1/workspace/overview", s.private(s.dashboard))
 	s.mux.HandleFunc("GET /api/v1/workspace/entries", s.private(s.listFiles))
+	s.mux.HandleFunc("GET /api/v1/workspace/entries/details", s.private(s.entryDetails))
 	s.mux.HandleFunc("GET /api/v1/workspace/search", s.private(s.searchFiles))
 	s.mux.HandleFunc("POST /api/v1/workspace/folders", s.private(s.createFolder))
 	s.mux.HandleFunc("POST /api/v1/workspace/documents", s.private(s.createEmptyFile))
@@ -72,6 +89,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/collaboration/shares", s.private(s.createShare))
 	s.mux.HandleFunc("POST /api/v1/collaboration/shares/batch", s.private(s.batchCreateShares))
 	s.mux.HandleFunc("DELETE /api/v1/collaboration/shares/expired", s.private(s.deleteExpiredShares))
+	s.mux.HandleFunc("PATCH /api/v1/collaboration/shares/{id}", s.private(s.updateShareLimits))
 	s.mux.HandleFunc("DELETE /api/v1/collaboration/shares/{id}", s.private(s.deleteShare))
 	s.mux.HandleFunc("GET /api/v1/delivery/links", s.private(s.listDirectLinks))
 	s.mux.HandleFunc("POST /api/v1/delivery/links", s.private(s.createDirectLink))
@@ -96,6 +114,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/admin/storage-nodes", s.superAdminOnly(s.createStorageSource))
 	s.mux.HandleFunc("PATCH /api/v1/admin/storage-nodes/{id}", s.superAdminOnly(s.updateStorageSource))
 	s.mux.HandleFunc("DELETE /api/v1/admin/storage-nodes/{id}", s.superAdminOnly(s.deleteStorageSource))
+	s.mux.HandleFunc("GET /api/v1/admin/theme", s.superAdminOnly(s.getThemeSettings))
+	s.mux.HandleFunc("PUT /api/v1/admin/theme", s.superAdminOnly(s.saveThemeSettings))
+	s.mux.HandleFunc("GET /api/v1/admin/announcements", s.superAdminOnly(s.listAnnouncements))
+	s.mux.HandleFunc("POST /api/v1/admin/announcements", s.superAdminOnly(s.createAnnouncement))
+	s.mux.HandleFunc("PATCH /api/v1/admin/announcements/{id}", s.superAdminOnly(s.updateAnnouncement))
+	s.mux.HandleFunc("DELETE /api/v1/admin/announcements/{id}", s.superAdminOnly(s.deleteAnnouncement))
 	s.mux.HandleFunc("GET /api/v1/preferences", s.private(s.getSettings))
 	s.mux.HandleFunc("PUT /api/v1/preferences", s.superAdminOnly(s.saveSettings))
 

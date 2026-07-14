@@ -116,16 +116,35 @@ func Migrate(db *sql.DB) error {
 			revoked_at TEXT,
 			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS announcements (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			title TEXT NOT NULL,
+			content TEXT NOT NULL,
+			published INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_access_logs_created_at ON access_logs(created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_file_metadata_source_path ON file_metadata(storage_key, path)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_announcements_published_updated ON announcements(published, updated_at DESC, id DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
 			return err
 		}
+	}
+	if _, err := db.Exec(`INSERT INTO announcements(title, content, published, created_at, updated_at)
+		SELECT '网站公告', value, 1, updated_at, updated_at
+		FROM settings
+		WHERE key = 'announcement' AND TRIM(value) <> ''
+			AND NOT EXISTS (SELECT 1 FROM announcements)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`DELETE FROM settings WHERE key = 'announcement'`); err != nil {
+		return err
 	}
 	if err := addColumnIfMissing(db, "shares", "password", "TEXT"); err != nil {
 		return err
@@ -143,6 +162,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, "shares", "paths", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "shares", "max_access_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := addColumnIfMissing(db, "direct_links", "access_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {

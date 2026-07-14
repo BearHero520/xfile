@@ -10,6 +10,13 @@ export interface FileEntry {
   metadataUpdatedAt?: string;
 }
 
+export interface EntryDetails extends FileEntry {
+  storageKey: string;
+  totalSize: number;
+  fileCount: number;
+  folderCount: number;
+}
+
 export interface StorageSource {
   id: number;
   name: string;
@@ -31,7 +38,77 @@ export interface PublicSite {
   initialized: boolean;
   loggedIn: boolean;
   sources: StorageSource[];
+  announcements: AnnouncementEntry[];
   preferences: Record<string, string>;
+}
+
+export interface AnnouncementEntry {
+  id: number;
+  title: string;
+  content: string;
+  published: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnnouncementInput {
+  title: string;
+  content: string;
+  published: boolean;
+}
+
+export interface ThemeSettings {
+  themePreset: string;
+  brandLogo: string;
+  brandFavicon: string;
+  brandingVersion: string;
+}
+
+export interface AboutAuthor {
+  login: string;
+  avatarUrl: string;
+  htmlUrl: string;
+}
+
+export interface AboutRepository {
+  name: string;
+  fullName: string;
+  description: string;
+  htmlUrl: string;
+  defaultBranch: string;
+  updatedAt: string;
+  pushedAt: string;
+  stars: number;
+  forks: number;
+  author: AboutAuthor;
+}
+
+export interface AboutDocument {
+  name: string;
+  path: string;
+  title: string;
+  htmlUrl: string;
+  content: string;
+}
+
+export interface AboutChange {
+  id: string;
+  type: "release" | "commit";
+  title: string;
+  body?: string;
+  tag?: string;
+  author?: string;
+  publishedAt: string;
+  htmlUrl: string;
+}
+
+export interface AboutData {
+  repository: AboutRepository;
+  documents: AboutDocument[];
+  changes: AboutChange[];
+  warnings?: string[];
+  fetchedAt: string;
+  stale?: boolean;
 }
 
 export interface UserEntry {
@@ -86,6 +163,7 @@ export interface ShareEntry {
   url: string;
   protected: boolean;
   expiresAt?: string;
+  maxAccessCount: number;
   viewCount: number;
   downloadCount: number;
   lastAccessAt?: string;
@@ -103,6 +181,7 @@ export interface ShareDetail {
   description?: string;
   protected: boolean;
   expiresAt?: string;
+  maxAccessCount: number;
   createdAt: string;
   files?: FileEntry[];
   itemCount: number;

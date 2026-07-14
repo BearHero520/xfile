@@ -2,6 +2,7 @@ package server
 
 import (
 	"archive/zip"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -133,6 +134,31 @@ func (s *Server) publicStorageFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, files)
 }
 
+func (s *Server) publicEntryDetails(w http.ResponseWriter, r *http.Request) {
+	storageKey := r.PathValue("key")
+	rel, err := cleanEntryDetailsPath(r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	directoryPassword := r.URL.Query().Get("directoryPassword")
+	list := func(current string) ([]domain.FileEntry, error) {
+		return s.store.ListSourceFilesWithPassword(storageKey, current, true, directoryPassword)
+	}
+	entry, err := entryFromParentList(rel, list)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	details, err := buildEntryDetails(r.Context(), storageKey, entry, list)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("public-details", storageKey+":"+rel, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusOK, details)
+}
+
 func (s *Server) publicStorageDownload(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOperation(w, r, downloadOperation(r)) {
 		return
@@ -204,6 +230,121 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	files = s.filterStorageFilesForUser(r, storageKey, files, true)
 	_ = s.store.LogAccess("list", storageKey+":"+path, clientIP(r), r.UserAgent())
 	writeJSON(w, http.StatusOK, files)
+}
+
+func (s *Server) entryDetails(w http.ResponseWriter, r *http.Request) {
+	storageKey := storageKeyFromRequest(r)
+	rel, err := cleanEntryDetailsPath(r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !s.requireStoragePathAccess(w, r, storageKey, rel) {
+		return
+	}
+	list := func(current string) ([]domain.FileEntry, error) {
+		files, listErr := s.store.ListSourceFilesForAdmin(storageKey, current)
+		if listErr != nil {
+			return nil, listErr
+		}
+		return s.filterStorageFilesForUser(r, storageKey, files, true), nil
+	}
+	entry, err := entryFromParentList(rel, list)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	details, err := buildEntryDetails(r.Context(), storageKey, entry, list)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("details", storageKey+":"+rel, clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusOK, details)
+}
+
+func cleanEntryDetailsPath(value string) (string, error) {
+	clean, err := cleanSharePath(value)
+	if err != nil {
+		return "", err
+	}
+	if clean == "" {
+		return "", errors.New("entry path is required")
+	}
+	return clean, nil
+}
+
+func entryFromParentList(rel string, list func(string) ([]domain.FileEntry, error)) (domain.FileEntry, error) {
+	parent := path.Dir(rel)
+	if parent == "." {
+		parent = ""
+	}
+	entries, err := list(parent)
+	if err != nil {
+		return domain.FileEntry{}, err
+	}
+	for _, entry := range entries {
+		if strings.Trim(entry.Path, "/") == rel {
+			return entry, nil
+		}
+	}
+	return domain.FileEntry{}, os.ErrNotExist
+}
+
+type entryFolderStats struct {
+	totalSize   int64
+	fileCount   int
+	folderCount int
+}
+
+func buildEntryDetails(ctx context.Context, storageKey string, entry domain.FileEntry, list func(string) ([]domain.FileEntry, error)) (domain.EntryDetails, error) {
+	details := domain.EntryDetails{
+		FileEntry:  entry,
+		StorageKey: storageKey,
+		TotalSize:  entry.Size,
+	}
+	if entry.Type != "folder" {
+		details.FileCount = 1
+		return details, nil
+	}
+	stats, err := collectEntryFolderStats(ctx, entry.Path, list)
+	if err != nil {
+		return domain.EntryDetails{}, err
+	}
+	details.TotalSize = stats.totalSize
+	details.FileCount = stats.fileCount
+	details.FolderCount = stats.folderCount
+	return details, nil
+}
+
+func collectEntryFolderStats(ctx context.Context, rel string, list func(string) ([]domain.FileEntry, error)) (entryFolderStats, error) {
+	if err := ctx.Err(); err != nil {
+		return entryFolderStats{}, err
+	}
+	entries, err := list(rel)
+	if err != nil {
+		return entryFolderStats{}, err
+	}
+	var stats entryFolderStats
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return entryFolderStats{}, err
+		}
+		if entry.Type == "folder" {
+			stats.folderCount++
+			childStats, childErr := collectEntryFolderStats(ctx, entry.Path, list)
+			if childErr != nil {
+				return entryFolderStats{}, childErr
+			}
+			stats.totalSize += childStats.totalSize
+			stats.fileCount += childStats.fileCount
+			stats.folderCount += childStats.folderCount
+			continue
+		}
+		stats.totalSize += entry.Size
+		stats.fileCount++
+	}
+	return stats, nil
 }
 
 func (s *Server) searchFiles(w http.ResponseWriter, r *http.Request) {
@@ -757,12 +898,13 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		StorageKey string `json:"storageKey"`
-		Path       string `json:"path"`
-		ExpiresAt  string `json:"expiresAt"`
-		Password   string `json:"password"`
-		Token      string `json:"token"`
-		CustomKey  string `json:"customKey"`
+		StorageKey     string `json:"storageKey"`
+		Path           string `json:"path"`
+		ExpiresAt      string `json:"expiresAt"`
+		Password       string `json:"password"`
+		MaxAccessCount int    `json:"maxAccessCount"`
+		Token          string `json:"token"`
+		CustomKey      string `json:"customKey"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -776,7 +918,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(customKey) == "" {
 		customKey = req.CustomKey
 	}
-	share, err := s.store.CreateSourceShareWithToken(storageKey, req.Path, req.ExpiresAt, req.Password, customKey)
+	share, err := s.store.CreateSourceShareWithTokenAndLimit(storageKey, req.Path, req.ExpiresAt, req.Password, customKey, req.MaxAccessCount)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -789,10 +931,11 @@ func (s *Server) batchCreateShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		StorageKey string   `json:"storageKey"`
-		Paths      []string `json:"paths"`
-		ExpiresAt  string   `json:"expiresAt"`
-		Password   string   `json:"password"`
+		StorageKey     string   `json:"storageKey"`
+		Paths          []string `json:"paths"`
+		ExpiresAt      string   `json:"expiresAt"`
+		Password       string   `json:"password"`
+		MaxAccessCount int      `json:"maxAccessCount"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -807,7 +950,7 @@ func (s *Server) batchCreateShares(w http.ResponseWriter, r *http.Request) {
 	if !s.requireStoragePathAccess(w, r, storageKey, paths...) {
 		return
 	}
-	share, err := s.store.CreateSourceBundleShare(storageKey, paths, req.ExpiresAt, req.Password)
+	share, err := s.store.CreateSourceBundleShareWithLimit(storageKey, paths, req.ExpiresAt, req.Password, req.MaxAccessCount)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -843,15 +986,16 @@ func normalizeBatchSharePaths(paths []string) ([]string, error) {
 }
 
 func cleanSharePath(value string) (string, error) {
-	value = strings.TrimPrefix(filepath.ToSlash(value), "/")
-	clean := filepath.Clean(filepath.FromSlash(value))
+	value = strings.ReplaceAll(value, `\`, "/")
+	value = strings.TrimPrefix(value, "/")
+	clean := path.Clean(value)
 	if clean == "." {
 		return "", nil
 	}
-	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+	if strings.HasPrefix(clean, "..") || path.IsAbs(clean) {
 		return "", errors.New("invalid path")
 	}
-	return filepath.ToSlash(clean), nil
+	return clean, nil
 }
 
 func (s *Server) deleteShare(w http.ResponseWriter, r *http.Request) {
@@ -865,6 +1009,36 @@ func (s *Server) deleteShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) updateShareLimits(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		ExpiresAt      string `json:"expiresAt"`
+		MaxAccessCount int    `json:"maxAccessCount"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	expiresAt, err := s.store.UpdateShareLimits(id, req.ExpiresAt, req.MaxAccessCount)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, errors.New("share not found"))
+			return
+		}
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_ = s.store.LogAccess("share-limits-update", strconv.FormatInt(id, 10), clientIP(r), r.UserAgent())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"expiresAt":      expiresAt,
+		"maxAccessCount": req.MaxAccessCount,
+	})
 }
 
 func (s *Server) deleteExpiredShares(w http.ResponseWriter, r *http.Request) {
@@ -884,18 +1058,24 @@ func (s *Server) sharePage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) publicShare(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	password := r.URL.Query().Get("password")
+	sharePath := strings.TrimSpace(r.URL.Query().Get("path"))
 	if !s.allowSharePasswordAttempt(w, r, token, password) {
 		return
 	}
-	detail, err := s.store.ShareDetail(token, password, r.URL.Query().Get("path"))
+	detail, err := s.store.ShareDetail(token, password, sharePath)
 	if err != nil {
 		s.recordSharePasswordFailure(r, token, password, err)
 		writeError(w, http.StatusForbidden, err)
 		return
 	}
+	share, err := s.store.ResolveShare(token, password)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
 	s.clearSharePasswordFailures(r, token)
-	if share, err := s.store.ResolveShare(token, password); err == nil {
-		_ = s.store.RecordShareView(share.ID)
+	if !s.recordShareAccess(w, r, share, sharePath == "") {
+		return
 	}
 	_ = s.store.LogAccess("share-view", detail.CurrentPath, clientIP(r), r.UserAgent())
 	writeJSON(w, http.StatusOK, detail)
@@ -918,6 +1098,9 @@ func (s *Server) downloadShare(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clearSharePasswordFailures(r, token)
 	defer download.Reader.Close()
+	if !s.recordShareAccess(w, r, share, false) {
+		return
+	}
 	downloadPath := share.StorageKey + ":" + share.Path
 	if child := strings.TrimSpace(r.URL.Query().Get("path")); child != "" {
 		downloadPath = strings.Trim(downloadPath+"/"+child, "/")
@@ -991,6 +1174,29 @@ func (s *Server) clearSharePasswordFailures(r *http.Request, token string) {
 
 func sharePasswordAttemptKey(token, ip string) string {
 	return strings.TrimSpace(token) + ":" + strings.TrimSpace(ip)
+}
+
+func (s *Server) recordShareAccess(w http.ResponseWriter, r *http.Request, share domain.Share, countView bool) bool {
+	limited := share.MaxAccessCount > 0
+	if limited && !countView && s.hasShareAccess(r, share.Token) {
+		return true
+	}
+	if !limited && !countView {
+		return true
+	}
+	if err := s.store.RecordShareView(share.ID); err != nil {
+		if errors.Is(err, appstore.ErrShareAccessLimitReached) {
+			_ = s.store.LogAccess("share-access-limit-reached", share.Token, clientIP(r), r.UserAgent())
+			writeError(w, http.StatusGone, err)
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return false
+	}
+	if limited {
+		s.setShareAccessCookie(w, r, share)
+	}
+	return true
 }
 
 func (s *Server) listDirectLinks(w http.ResponseWriter, r *http.Request) {
@@ -1374,6 +1580,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	removeBrandingSettings(settings)
 	user, err := s.currentUser(r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err)
@@ -1397,6 +1604,7 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	removeBrandingSettings(req)
 	if err := validateAccessSettings(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

@@ -3,16 +3,7 @@
 ## 结论
 
 - 未发现需要阻止交付的 P0/P1/P2 问题。
-- 文件浏览交互以 ZFile 为准，未采用生成图中的三栏工作台或右侧常驻检查器。
 - iOS 26 参考只用于蓝色主色、玻璃表面、圆角、阴影和层级关系。
-
-## 交互事实来源
-
-- `E:\工作台\zfile\img\file-list.png`
-- `E:\工作台\zfile\img\gallery.png`
-- `E:\工作台\zfile\img\view-setting.png`
-- `E:\工作台\zfile\src\main\java\im\zhaojun\zfile\module\config\model\request\UpdateViewSettingRequest.java`
-- `E:\工作台\zfile\src\main\java\im\zhaojun\zfile\module\config\model\result\FrontSiteConfigResult.java`
 
 ## 视觉事实来源
 
@@ -21,9 +12,9 @@
 
 ## 实现证据
 
-- 桌面文件首页：`E:\工作台\xfile\.codex-qa\zfile-desktop-home.png`
-- 桌面显示设置：`E:\工作台\xfile\.codex-qa\zfile-desktop-display-settings.png`
-- 移动端文件预览：`E:\工作台\xfile\.codex-qa\zfile-mobile-preview.png`
+- 桌面文件首页：`E:\工作台\xfile\.codex-qa\xfile-desktop.png`
+- 桌面公开文件选择：`E:\工作台\xfile\.codex-qa\xfile-public-selected.png`
+- 桌面显示设置：`E:\工作台\xfile\.codex-qa\xfile-settings-refactor.png`
 
 ## 已验证交互
 
@@ -37,7 +28,7 @@
 - 图片、文本、音视频和 PDF 预览弹层；没有右侧常驻检查器。
 - 新建文件夹、新建文件、上传、移动、复制、重命名、文件说明和删除入口。
 - 分享与直链入口遵循显示设置。
-- 后台导航采用 ZFile 的系统设置、链接与统计、规则与权限分类。
+- 后台导航按系统设置、链接与统计、规则与权限分类。
 - 显示设置保存后可持久化，已验证重新加载仍保持配置。
 - 桌面/移动布局、表格密度、点击方式、排序与加载设置均作用到文件页。
 - 公开文件夹分享使用相对分享路径，可继续进入嵌套目录。

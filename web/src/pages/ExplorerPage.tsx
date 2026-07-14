@@ -1,4 +1,10 @@
-import type { FileEntry, StorageSource } from "../types";
+import type {
+  AnnouncementEntry,
+  EntryDetails,
+  FavoriteEntry,
+  FileEntry,
+  StorageSource,
+} from "../types";
 import {
   AppsList20Regular,
   Archive20Regular,
@@ -36,6 +42,7 @@ import {
   Grid20Regular,
   GroupList20Regular,
   Image20Regular,
+  Info20Regular,
   Link20Regular,
   MegaphoneLoud20Regular,
   MoreHorizontal20Regular,
@@ -73,6 +80,7 @@ import {
   useState,
 } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { FaGithub } from "react-icons/fa";
 import Editor from "react-simple-code-editor";
 import { QRCodeSVG } from "qrcode.react";
 import {
@@ -88,6 +96,7 @@ import {
 import AppearanceControl from "../components/AppearanceControl";
 import BrandMark from "../components/BrandMark";
 import FilePreview, { filePreviewKind } from "../components/FilePreview";
+import QuickManageModal from "../components/QuickManageModal";
 import VideoPreview, { isVideoFileName } from "../components/VideoPreview";
 import {
   detectNovelDocument,
@@ -140,7 +149,27 @@ type GeneratedLink = {
   value: string;
   kind: "share" | "direct";
 };
+type ShareDraft = {
+  targets: FileEntry[];
+  expiresAt: string;
+  maxAccessCount: string;
+  password: string;
+};
 type QuickNavKey = "shares" | "delivery" | "favorites";
+
+const announcementReadStorageKey = "xfile-announcements-read";
+
+function announcementVersion(items: AnnouncementEntry[]) {
+  let hash = 2166136261;
+  const source = JSON.stringify(
+    items.map((item) => [item.id, item.title, item.content, item.updatedAt]),
+  );
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${items.length}:${hash >>> 0}`;
+}
 
 const fileMenuOptions: Array<{ key: FileMenuActionKey; label: string }> = [
   { key: "open", label: "打开" },
@@ -180,20 +209,17 @@ function createBlankDocx(name: string) {
 const quickNavOptions: Array<{
   key: QuickNavKey;
   label: string;
-  to: string;
   icon: React.ReactNode;
 }> = [
-  { key: "shares", label: "我的分享", to: "/shares", icon: <Share20Regular /> },
+  { key: "shares", label: "我的分享", icon: <Share20Regular /> },
   {
     key: "delivery",
     label: "我的短链",
-    to: "/delivery",
     icon: <Link20Regular />,
   },
   {
     key: "favorites",
     label: "我的收藏",
-    to: "/favorites",
     icon: <Star20Regular />,
   },
 ];
@@ -209,6 +235,11 @@ function parentPath(path: string) {
   const parts = path.split("/").filter(Boolean);
   parts.pop();
   return parts.join("/");
+}
+
+function localDateTimeValue(date: Date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
 }
 
 function extension(file: FileEntry) {
@@ -663,9 +694,15 @@ export default function ExplorerPage({
   const [searchParams] = useSearchParams();
   const uploadInput = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
-  const locationInitialized = useRef(false);
   const loadRequestId = useRef(0);
   const preferences = site?.preferences || {};
+  const announcements = site?.announcements || [];
+  const currentAnnouncementVersion = useMemo(
+    () => announcementVersion(announcements),
+    [announcements],
+  );
+  const rootShowsSources =
+    (preferences.rootShowStorage || "enabled") === "enabled";
   const [sources, setSources] = useState<StorageSource[]>([]);
   const [sourceKey, setSourceKey] = useState("");
   const [path, setPath] = useState("");
@@ -690,19 +727,28 @@ export default function ExplorerPage({
   const [dialogValue, setDialogValue] = useState("");
   const [saving, setSaving] = useState(false);
   const [previewFile, setPreviewFile] = useState<FileEntry | null>(null);
+  const [detailsFile, setDetailsFile] = useState<FileEntry | null>(null);
+  const [details, setDetails] = useState<EntryDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState("");
+  const detailsRequestId = useRef(0);
   const [previewText, setPreviewText] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewSaving, setPreviewSaving] = useState(false);
   const [imageScale, setImageScale] = useState(1);
   const [imageRotation, setImageRotation] = useState(0);
   const [generatedLinks, setGeneratedLinks] = useState<GeneratedLink[]>([]);
+  const [shareDraft, setShareDraft] = useState<ShareDraft | null>(null);
+  const [shareSaving, setShareSaving] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>(
     {},
   );
   const [dragActive, setDragActive] = useState(false);
   const [directoryPassword, setDirectoryPassword] = useState("");
   const [noticeOpen, setNoticeOpen] = useState(false);
-  const [docsOpen, setDocsOpen] = useState(false);
+  const [seenAnnouncementVersion, setSeenAnnouncementVersion] = useState(
+    () => localStorage.getItem(announcementReadStorageKey) || "",
+  );
   const [customMenuOpen, setCustomMenuOpen] = useState(false);
   const [favoriteIds, setFavoriteIds] = useState<Record<string, number>>({});
   const [favoritePulse, setFavoritePulse] = useState<string[]>([]);
@@ -736,11 +782,45 @@ export default function ExplorerPage({
       return quickNavOptions.map((option) => option.key);
     }
   });
+
+  const hasUnreadAnnouncement =
+    announcements.length > 0 &&
+    currentAnnouncementVersion !== seenAnnouncementVersion;
+
+  function openAnnouncements() {
+    setNoticeOpen(true);
+    localStorage.setItem(
+      announcementReadStorageKey,
+      currentAnnouncementVersion,
+    );
+    setSeenAnnouncementVersion(currentAnnouncementVersion);
+  }
+  const [quickManageSection, setQuickManageSection] =
+    useState<QuickNavKey | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
     file?: FileEntry;
   } | null>(null);
+
+  function browseTo(nextSourceKey: string, nextPath = "", replace = false) {
+    const normalizedPath = nextSourceKey ? nextPath : "";
+    setSourceKey(nextSourceKey);
+    setPath(normalizedPath);
+
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextSourceKey) nextParams.set("source", nextSourceKey);
+    else nextParams.delete("source");
+    if (normalizedPath) nextParams.set("path", normalizedPath);
+    else nextParams.delete("path");
+
+    const nextSearch = nextParams.toString();
+    if (nextSearch === searchParams.toString()) return;
+    navigate(
+      { pathname: "/", search: nextSearch ? `?${nextSearch}` : "" },
+      { replace },
+    );
+  }
 
   useEffect(() => {
     setImageScale(1);
@@ -752,13 +832,7 @@ export default function ExplorerPage({
       (source) => source.enabled && (!publicMode || source.public),
     );
     setSources(next);
-    const rootShowsSources =
-      (site?.preferences?.rootShowStorage || "enabled") === "enabled";
-    if (next.length === 1 || !rootShowsSources)
-      setSourceKey((current) => current || next[0]?.key || "");
-    else if (sourceKey && !next.some((source) => source.key === sourceKey))
-      setSourceKey("");
-  }, [site, publicMode, sourceKey]);
+  }, [site, publicMode]);
 
   useEffect(() => {
     localStorage.setItem("xfile-home-navigation", JSON.stringify(quickNav));
@@ -793,18 +867,24 @@ export default function ExplorerPage({
   }, [fileMenuItems]);
 
   useEffect(() => {
-    if (locationInitialized.current || !sources.length) return;
+    if (!sources.length) {
+      setSourceKey("");
+      setPath("");
+      return;
+    }
     const requestedSource = searchParams.get("source") || "";
     const requestedPath = searchParams.get("path") || "";
-    if (
-      requestedSource &&
-      sources.some((source) => source.key === requestedSource)
-    ) {
-      setSourceKey(requestedSource);
-      setPath(requestedPath);
-    }
-    locationInitialized.current = true;
-  }, [searchParams, sources]);
+    const hasRequestedSource =
+      !!requestedSource &&
+      sources.some((source) => source.key === requestedSource);
+    const nextSourceKey = hasRequestedSource
+      ? requestedSource
+      : sources.length === 1 || !rootShowsSources
+        ? sources[0]?.key || ""
+        : "";
+    setSourceKey(nextSourceKey);
+    setPath(hasRequestedSource ? requestedPath : "");
+  }, [rootShowsSources, searchParams, sources]);
 
   useEffect(() => {
     setSortField((preferences.defaultSortField as SortField) || "name");
@@ -1006,7 +1086,7 @@ export default function ExplorerPage({
 
   function open(file: FileEntry) {
     if (file.type === "folder") {
-      setPath(file.path);
+      browseTo(sourceKey, file.path);
       return;
     }
     setPreviewFile(file);
@@ -1022,12 +1102,42 @@ export default function ExplorerPage({
   }
 
   function activate(file: FileEntry) {
-    const mobile = window.matchMedia("(max-width: 760px)").matches;
-    const mode = mobile
-      ? preferences.mobileFileClickMode || "click"
-      : preferences.fileClickMode || "dbclick";
-    if (mode === "click") open(file);
-    else toggle(file);
+    if (selected.length > 0) {
+      toggle(file);
+      return;
+    }
+    open(file);
+  }
+
+  async function openDetails(file: FileEntry) {
+    const requestId = ++detailsRequestId.current;
+    setContextMenu(null);
+    setDetailsFile(file);
+    setDetails(null);
+    setDetailsError("");
+    setDetailsLoading(true);
+    try {
+      const next = publicMode
+        ? await api.publicEntryDetails(sourceKey, file.path, directoryPassword)
+        : await api.entryDetails(sourceKey, file.path);
+      if (detailsRequestId.current === requestId) setDetails(next);
+    } catch (nextError) {
+      if (detailsRequestId.current === requestId) {
+        setDetailsError(
+          nextError instanceof Error ? nextError.message : "详情加载失败",
+        );
+      }
+    } finally {
+      if (detailsRequestId.current === requestId) setDetailsLoading(false);
+    }
+  }
+
+  function closeDetails() {
+    detailsRequestId.current++;
+    setDetailsFile(null);
+    setDetails(null);
+    setDetailsError("");
+    setDetailsLoading(false);
   }
 
   function sortBy(field: SortField) {
@@ -1273,7 +1383,7 @@ export default function ExplorerPage({
     }
   }
 
-  async function createShare(file?: FileEntry) {
+  function createShare(file?: FileEntry) {
     const targets = file
       ? [file]
       : selectedFiles.length
@@ -1282,19 +1392,56 @@ export default function ExplorerPage({
           ? [previewFile]
           : [];
     if (!targets.length) return;
+    setContextMenu(null);
+    setPreviewFile(null);
+    setShareDraft({
+      targets,
+      expiresAt: "",
+      maxAccessCount: "",
+      password: "",
+    });
+  }
+
+  async function submitShare() {
+    if (!shareDraft || shareSaving) return;
+    const { targets } = shareDraft;
+    const accessCountValue = shareDraft.maxAccessCount.trim();
+    const maxAccessCount = accessCountValue ? Number(accessCountValue) : 0;
+    if (
+      accessCountValue &&
+      (!Number.isSafeInteger(maxAccessCount) || maxAccessCount < 1)
+    ) {
+      show("可访问次数必须是大于 0 的整数", "error");
+      return;
+    }
+    let expiresAt = "";
+    if (shareDraft.expiresAt) {
+      const expires = new Date(shareDraft.expiresAt);
+      if (Number.isNaN(expires.getTime()) || expires.getTime() <= Date.now()) {
+        show("自动过期时间必须晚于当前时间", "error");
+        return;
+      }
+      expiresAt = expires.toISOString();
+    }
+    setShareSaving(true);
     try {
       const share =
         targets.length === 1
           ? await api.createShare({
               storageKey: sourceKey,
               path: targets[0].path,
+              password: shareDraft.password,
+              expiresAt,
+              maxAccessCount,
             })
           : await api.batchShares(
               sourceKey,
               targets.map((target) => target.path),
+              shareDraft.password,
+              expiresAt,
+              maxAccessCount,
             );
-      setPreviewFile(null);
-      setContextMenu(null);
+      setShareDraft(null);
       setGeneratedLinks([
         {
           label:
@@ -1316,6 +1463,8 @@ export default function ExplorerPage({
         nextError instanceof Error ? nextError.message : "分享失败",
         "error",
       );
+    } finally {
+      setShareSaving(false);
     }
   }
 
@@ -1448,6 +1597,14 @@ export default function ExplorerPage({
     navigator.clipboard
       .writeText(value)
       .then(() => show("链接已复制", "success"));
+  }
+
+  function locateFavorite(item: FavoriteEntry) {
+    const nextPath = parentPath(item.path);
+    setQuickManageSection(null);
+    setSelected([]);
+    setKeyword("");
+    browseTo(item.storageKey, nextPath, true);
   }
 
   const directoryContextActions = (
@@ -1637,18 +1794,28 @@ export default function ExplorerPage({
           <BrandMark />
           <strong>XFile</strong>
         </Link>
-        <span className="public-product-label">
-          {site?.siteName || "公开网盘"}
-        </span>
+        {site?.siteName?.trim() &&
+          site.siteName.trim().toLowerCase() !== "xfile" && (
+            <span className="public-product-label">{site.siteName}</span>
+          )}
         {!publicMode && (
           <nav className="home-quick-nav" aria-label="个人资源导航">
             {quickNavOptions
               .filter((option) => quickNav.includes(option.key))
               .map((option) => (
-                <Link key={option.key} to={option.to}>
+                <button
+                  key={option.key}
+                  type="button"
+                  aria-haspopup="dialog"
+                  aria-expanded={quickManageSection === option.key}
+                  className={
+                    quickManageSection === option.key ? "is-active" : ""
+                  }
+                  onClick={() => setQuickManageSection(option.key)}
+                >
                   {option.icon}
                   <span>{option.label}</span>
-                </Link>
+                </button>
               ))}
             <Popover
               label="自定义首页导航"
@@ -1701,25 +1868,16 @@ export default function ExplorerPage({
           />
         </div>
         <div className="xfile-header-actions">
-          {preferences.showAnnouncement !== "disabled" && (
-            <IconButton label="公告" onClick={() => setNoticeOpen(true)}>
-              <MegaphoneLoud20Regular />
-            </IconButton>
-          )}
-          {preferences.showDocument !== "disabled" && (
-            <IconButton label="文档区" onClick={() => setDocsOpen(true)}>
-              <BookOpen20Regular />
-            </IconButton>
-          )}
-          <IconButton label="刷新" onClick={load}>
-            <ArrowSync20Regular />
-          </IconButton>
-          {!publicMode && (
+          {announcements.length > 0 && (
             <IconButton
-              label="上传"
-              onClick={() => uploadInput.current?.click()}
+              className="announcement-button"
+              label={hasUnreadAnnouncement ? "公告（有新内容）" : "公告"}
+              onClick={openAnnouncements}
             >
-              <Open20Regular />
+              <MegaphoneLoud20Regular />
+              {hasUnreadAnnouncement && (
+                <span className="announcement-dot" aria-hidden="true" />
+              )}
             </IconButton>
           )}
           <IconButton
@@ -1742,15 +1900,22 @@ export default function ExplorerPage({
               <Settings20Regular />
             </Link>
           )}
+          <a
+            className="icon-button github-header-link"
+            href="https://github.com/BearHero520/xfile"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="在 GitHub 查看 BearHero520/xfile 项目"
+            title="GitHub · BearHero520/xfile"
+          >
+            <FaGithub aria-hidden="true" />
+          </a>
           <AppearanceControl />
           <select
             className="storage-selector"
             aria-label="选择存储源"
             value={sourceKey}
-            onChange={(event) => {
-              setSourceKey(event.target.value);
-              setPath("");
-            }}
+            onChange={(event) => browseTo(event.target.value)}
           >
             <option value="">全部存储源</option>
             {sources.map((source) => (
@@ -1778,7 +1943,7 @@ export default function ExplorerPage({
       </header>
 
       <main
-        className={`xfile-browser ${preferences.layout === "center" ? "is-desktop-centered" : ""} ${preferences.mobileLayout === "center" ? "is-mobile-centered" : ""}`}
+        className={`xfile-browser ${selected.length > 0 ? "is-selection-mode" : ""} ${preferences.layout === "center" ? "is-desktop-centered" : ""} ${preferences.mobileLayout === "center" ? "is-mobile-centered" : ""}`}
       >
         <section
           className={`xfile-surface glass-panel ${dragActive ? "is-drag-active" : ""}`}
@@ -1831,8 +1996,8 @@ export default function ExplorerPage({
               label="返回上级"
               disabled={!sourceKey}
               onClick={() => {
-                if (path) setPath(parentPath(path));
-                else setSourceKey("");
+                if (path) browseTo(sourceKey, parentPath(path));
+                else browseTo("");
               }}
             >
               <ArrowLeft20Regular />
@@ -1842,10 +2007,8 @@ export default function ExplorerPage({
                 <span key={`${crumb.label}-${index}`}>
                   <button
                     onClick={() => {
-                      if (crumb.root) {
-                        setSourceKey("");
-                        setPath("");
-                      } else setPath(crumb.value);
+                      if (crumb.root) browseTo("");
+                      else browseTo(sourceKey, crumb.value);
                     }}
                   >
                     {crumb.label}
@@ -1958,10 +2121,7 @@ export default function ExplorerPage({
           {error && <ErrorBanner error={error} onRetry={load} />}
 
           {!sourceKey ? (
-            <StorageRoot
-              sources={sources}
-              onOpen={(key) => setSourceKey(key)}
-            />
+            <StorageRoot sources={sources} onOpen={(key) => browseTo(key)} />
           ) : loading ? (
             <Loading label="正在读取文件" />
           ) : displayedFiles.length === 0 ? (
@@ -2018,7 +2178,6 @@ export default function ExplorerPage({
                           <button
                             className="gallery-file"
                             onClick={() => activate(file)}
-                            onDoubleClick={() => open(file)}
                           >
                             {file.type === "file" &&
                             [
@@ -2045,6 +2204,15 @@ export default function ExplorerPage({
                             </small>
                           </button>
                           <div className="gallery-card-actions">
+                            <IconButton
+                              label={`查看 ${file.name} 详情`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void openDetails(file);
+                              }}
+                            >
+                              <Info20Regular />
+                            </IconButton>
                             {!publicMode && (
                               <IconButton
                                 className={`favorite-button ${isFavorite ? "is-active" : ""}`}
@@ -2164,7 +2332,6 @@ export default function ExplorerPage({
                             ]
                               .filter(Boolean)
                               .join(" ")}
-                            onDoubleClick={() => open(file)}
                             onContextMenu={(event) => {
                               event.preventDefault();
                               setContextMenu({
@@ -2212,6 +2379,15 @@ export default function ExplorerPage({
                             </td>
                             <td>
                               <div className="file-row-actions">
+                                <IconButton
+                                  label={`查看 ${file.name} 详情`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void openDetails(file);
+                                  }}
+                                >
+                                  <Info20Regular />
+                                </IconButton>
                                 {!publicMode && (
                                   <IconButton
                                     className={`favorite-button ${isFavorite ? "is-active" : ""}`}
@@ -2275,7 +2451,7 @@ export default function ExplorerPage({
           <footer className="xfile-status">
             <span>
               {sourceKey
-                ? `共 ${visibleFiles.length} 项${selected.length ? `（已选择 ${selected.length} 项）` : ""}`
+                ? `共 ${visibleFiles.length} 项${selected.length ? `（已选择 ${selected.length} 项，单击项目继续选择）` : ""}`
                 : `${sources.length} 个存储源`}
             </span>
             <span>
@@ -2331,6 +2507,15 @@ export default function ExplorerPage({
                   新标签打开
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() =>
+                  contextMenu.file && void openDetails(contextMenu.file)
+                }
+              >
+                <Info20Regular />
+                详情
+              </button>
               {menuItemEnabled("packageDownload") && (
                 <button
                   type="button"
@@ -2451,6 +2636,91 @@ export default function ExplorerPage({
         </div>
       )}
 
+      <QuickManageModal
+        section={quickManageSection}
+        onSectionChange={setQuickManageSection}
+        onClose={() => setQuickManageSection(null)}
+        onLocateFavorite={locateFavorite}
+      />
+
+      <Modal
+        open={!!detailsFile}
+        title="项目详情"
+        description={detailsFile?.name}
+        onClose={closeDetails}
+        footer={
+          <Button variant="primary" onClick={closeDetails}>
+            完成
+          </Button>
+        }
+      >
+        {detailsFile && (
+          <div className="entry-details">
+            <div className="entry-details-heading">
+              <FileGlyph file={detailsFile} />
+              <div>
+                <strong>{detailsFile.name}</strong>
+                <span>
+                  {detailsFile.type === "folder"
+                    ? "文件夹"
+                    : `${extension(detailsFile).toUpperCase() || "文件"} 文件`}
+                </span>
+              </div>
+            </div>
+            {detailsError && (
+              <ErrorBanner
+                error={detailsError}
+                onRetry={() => void openDetails(detailsFile)}
+              />
+            )}
+            <dl className="entry-details-grid">
+              <div>
+                <dt>大小</dt>
+                <dd>
+                  {detailsLoading
+                    ? "正在统计…"
+                    : formatBytes(details?.totalSize ?? detailsFile.size)}
+                </dd>
+              </div>
+              <div>
+                <dt>修改时间</dt>
+                <dd>{formatTime(detailsFile.modifiedAt)}</dd>
+              </div>
+              <div>
+                <dt>存储源</dt>
+                <dd>{activeSource?.name || sourceKey}</dd>
+              </div>
+              <div>
+                <dt>项目类型</dt>
+                <dd>{detailsFile.type === "folder" ? "文件夹" : "文件"}</dd>
+              </div>
+              {detailsFile.type === "folder" && (
+                <>
+                  <div>
+                    <dt>文件数量</dt>
+                    <dd>{detailsLoading ? "—" : (details?.fileCount ?? 0)}</dd>
+                  </div>
+                  <div>
+                    <dt>子文件夹</dt>
+                    <dd>
+                      {detailsLoading ? "—" : (details?.folderCount ?? 0)}
+                    </dd>
+                  </div>
+                </>
+              )}
+              <div className="entry-details-path">
+                <dt>完整路径</dt>
+                <dd>/{detailsFile.path}</dd>
+              </div>
+              <div className="entry-details-path">
+                <dt>说明</dt>
+                <dd>{detailsFile.description || "暂无说明"}</dd>
+              </div>
+            </dl>
+          </div>
+        )}
+      </Modal>
+
       <Modal
         open={customMenuOpen}
         title="自定义右键菜单"
@@ -2506,9 +2776,7 @@ export default function ExplorerPage({
         size="large"
         className={`modal-preview ${
           previewKind === "video" ? "modal-preview-video" : ""
-        } ${
-          imagePreviewOpen ? "modal-preview-image" : ""
-        }`}
+        } ${imagePreviewOpen ? "modal-preview-image" : ""}`}
         bodyClassName="modal-preview-body"
         footer={
           previewFile && (
@@ -2538,7 +2806,10 @@ export default function ExplorerPage({
                   >
                     <ZoomIn20Regular />
                   </IconButton>
-                  <span className="image-toolbar-separator" aria-hidden="true" />
+                  <span
+                    className="image-toolbar-separator"
+                    aria-hidden="true"
+                  />
                   <IconButton
                     label="向左旋转"
                     onClick={() =>
@@ -2558,7 +2829,10 @@ export default function ExplorerPage({
                   <IconButton label="恢复图片视图" onClick={resetImageView}>
                     <ArrowReset20Regular />
                   </IconButton>
-                  <span className="image-toolbar-separator" aria-hidden="true" />
+                  <span
+                    className="image-toolbar-separator"
+                    aria-hidden="true"
+                  />
                 </>
               )}
               <Button
@@ -2618,6 +2892,96 @@ export default function ExplorerPage({
               onTextChange={setPreviewText}
               onSaveText={saveText}
             />
+          </div>
+        )}
+      </Modal>
+      <Modal
+        open={!!shareDraft}
+        title="分享设置"
+        description={
+          shareDraft
+            ? shareDraft.targets.length > 1
+              ? `将 ${shareDraft.targets.length} 个项目合并为一个分享链接，以下限制均可选填。`
+              : `为“${shareDraft.targets[0]?.name || "所选项目"}”创建分享，以下限制均可选填。`
+            : undefined
+        }
+        onClose={() => !shareSaving && setShareDraft(null)}
+        footer={
+          <>
+            <Button disabled={shareSaving} onClick={() => setShareDraft(null)}>
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              loading={shareSaving}
+              onClick={() => void submitShare()}
+            >
+              创建分享
+            </Button>
+          </>
+        }
+      >
+        {shareDraft && (
+          <div className="form-grid share-settings-form">
+            <Field
+              label="自动过期时间（选填）"
+              hint="到达该时间后，分享链接将自动失效。"
+            >
+              <input
+                type="datetime-local"
+                min={localDateTimeValue(new Date(Date.now() + 60_000))}
+                value={shareDraft.expiresAt}
+                onChange={(event) =>
+                  setShareDraft((current) =>
+                    current
+                      ? { ...current, expiresAt: event.target.value }
+                      : current,
+                  )
+                }
+              />
+            </Field>
+            <Field
+              label="可访问次数（选填）"
+              hint="留空表示不限次数，每个新访问会消耗 1 次。"
+            >
+              <input
+                type="number"
+                min="1"
+                step="1"
+                inputMode="numeric"
+                placeholder="不限次数"
+                value={shareDraft.maxAccessCount}
+                onChange={(event) =>
+                  setShareDraft((current) =>
+                    current
+                      ? { ...current, maxAccessCount: event.target.value }
+                      : current,
+                  )
+                }
+              />
+            </Field>
+            <Field
+              className="span-2"
+              label="访问密码（选填）"
+              hint="设置后，访客需要输入正确密码才能打开分享。"
+            >
+              <input
+                type="password"
+                autoComplete="new-password"
+                placeholder="不设置密码"
+                value={shareDraft.password}
+                onChange={(event) =>
+                  setShareDraft((current) =>
+                    current
+                      ? { ...current, password: event.target.value }
+                      : current,
+                  )
+                }
+                onKeyDown={(event) =>
+                  event.key === "Enter" && void submitShare()
+                }
+              />
+            </Field>
           </div>
         )}
       </Modal>
@@ -2721,22 +3085,26 @@ export default function ExplorerPage({
       <Modal
         open={noticeOpen}
         title="网站公告"
+        description={`共 ${announcements.length} 条公开公告`}
+        size="large"
         onClose={() => setNoticeOpen(false)}
       >
-        <div className="document-content">
-          <MegaphoneLoud20Regular />
-          <p>
-            {preferences.announcement ||
-              "欢迎使用 XFile。管理员可以在显示设置中更新公告内容。"}
-          </p>
-        </div>
-      </Modal>
-      <Modal open={docsOpen} title="文档区" onClose={() => setDocsOpen(false)}>
-        <div className="document-content">
-          <BookOpen20Regular />
-          <p>
-            文件浏览支持列表、画廊、在线预览、分享、直链和批量操作。更多使用说明由管理员在显示设置中维护。
-          </p>
+        <div className="announcement-feed">
+          {announcements.map((item, index) => (
+            <article className="announcement-card" key={item.id}>
+              <header>
+                <div>
+                  <MegaphoneLoud20Regular />
+                  <h3>{item.title}</h3>
+                  {index === 0 && <Badge tone="info">最新</Badge>}
+                </div>
+                <time dateTime={item.updatedAt}>
+                  {formatTime(item.updatedAt)}
+                </time>
+              </header>
+              <p>{item.content}</p>
+            </article>
+          ))}
         </div>
       </Modal>
       {publicMode && error.toLowerCase().includes("password") && (

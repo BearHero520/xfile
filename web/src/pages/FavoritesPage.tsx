@@ -33,7 +33,13 @@ function exitDelay() {
   );
 }
 
-export default function FavoritesPage() {
+export default function FavoritesPage({
+  embedded = false,
+  onLocate,
+}: {
+  embedded?: boolean;
+  onLocate?: (item: FavoriteEntry) => void;
+}) {
   const { show } = useToast();
   const [items, setItems] = useState<FavoriteEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -85,29 +91,38 @@ export default function FavoritesPage() {
     }
   }
 
+  const headerActions = (
+    <>
+      <label className="resource-search">
+        <Search20Regular aria-hidden="true" />
+        <input
+          aria-label="查询收藏"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="查询路径或存储源"
+        />
+      </label>
+      <Button icon={<ArrowSync20Regular />} onClick={load}>
+        刷新
+      </Button>
+    </>
+  );
+
   return (
-    <div className="page-stack">
-      <PageHeader
-        eyebrow="个人资源"
-        title="我的收藏"
-        description="查询常用文件和文件夹，或随时取消收藏。"
-        actions={
-          <>
-            <label className="resource-search">
-              <Search20Regular aria-hidden="true" />
-              <input
-                aria-label="查询收藏"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="查询路径或存储源"
-              />
-            </label>
-            <Button icon={<ArrowSync20Regular />} onClick={load}>
-              刷新
-            </Button>
-          </>
-        }
-      />
+    <div className={`page-stack ${embedded ? "quick-manage-page" : ""}`}>
+      {embedded ? (
+        <div className="quick-manage-toolbar">
+          <p>查找常用文件和文件夹，定位后会回到当前文件列表。</p>
+          <div className="page-actions">{headerActions}</div>
+        </div>
+      ) : (
+        <PageHeader
+          eyebrow="个人资源"
+          title="我的收藏"
+          description="查询常用文件和文件夹，或随时取消收藏。"
+          actions={headerActions}
+        />
+      )}
       {error && <ErrorBanner error={error} onRetry={load} />}
       {loading ? (
         <Loading />
@@ -150,13 +165,23 @@ export default function FavoritesPage() {
                   <td>{formatTime(item.createdAt)}</td>
                   <td>
                     <div className="row-actions">
-                      <Link
-                        className="button button-ghost button-medium"
-                        to={`/?source=${encodeURIComponent(item.storageKey)}&path=${encodeURIComponent(parentPath(item.path))}`}
-                      >
-                        <FolderOpen20Regular />
-                        定位
-                      </Link>
+                      {embedded && onLocate ? (
+                        <Button
+                          variant="ghost"
+                          icon={<FolderOpen20Regular />}
+                          onClick={() => onLocate(item)}
+                        >
+                          定位
+                        </Button>
+                      ) : (
+                        <Link
+                          className="button button-ghost button-medium"
+                          to={`/?source=${encodeURIComponent(item.storageKey)}&path=${encodeURIComponent(parentPath(item.path))}`}
+                        >
+                          <FolderOpen20Regular />
+                          定位
+                        </Link>
+                      )}
                       <Button
                         variant="ghost"
                         icon={<Delete20Regular />}

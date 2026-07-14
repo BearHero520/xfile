@@ -3,7 +3,7 @@ import {
   Save20Regular,
   ShieldCheckmark20Regular,
 } from "@fluentui/react-icons";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import {
   Button,
@@ -38,9 +38,7 @@ const defaults: Record<string, string> = {
   fileClickMode: "dbclick",
   mobileFileClickMode: "click",
   rootShowStorage: "enabled",
-  showDocument: "enabled",
   showAnnouncement: "enabled",
-  announcement: "",
   showLogin: "enabled",
   defaultSortField: "name",
   defaultSortOrder: "asc",
@@ -77,6 +75,26 @@ const defaults: Record<string, string> = {
   ipAllowList: "",
   ipDenyList: "",
 };
+
+let preferencesCache: Record<string, string> | null = null;
+let preferencesRequest: Promise<Record<string, string>> | null = null;
+
+function getPreferences(force = false) {
+  if (!force && preferencesCache) return Promise.resolve(preferencesCache);
+  if (!force && preferencesRequest) return preferencesRequest;
+
+  const request = api
+    .preferences()
+    .then((preferences) => {
+      preferencesCache = { ...defaults, ...preferences };
+      return preferencesCache;
+    })
+    .finally(() => {
+      if (preferencesRequest === request) preferencesRequest = null;
+    });
+  preferencesRequest = request;
+  return request;
+}
 
 const sectionInfo: Record<
   SettingsSection,
@@ -135,30 +153,39 @@ export default function SettingsPage({
   section: SettingsSection;
 }) {
   const { show } = useToast();
-  const [form, setForm] = useState<Record<string, string>>(defaults);
-  const [loading, setLoading] = useState(true);
+  const [form, setForm] = useState<Record<string, string>>(
+    () => preferencesCache || defaults,
+  );
+  const [loading, setLoading] = useState(() => preferencesCache === null);
   const [saving, setSaving] = useState(false);
   const info = useMemo(() => sectionInfo[section], [section]);
 
-  const load = async () => {
-    setLoading(true);
-    try {
-      setForm({ ...defaults, ...(await api.preferences()) });
-    } catch (error) {
-      show(error instanceof Error ? error.message : "设置加载失败", "error");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const load = useCallback(
+    async (force = false) => {
+      if (force || !preferencesCache) setLoading(true);
+      try {
+        setForm(await getPreferences(force));
+      } catch (error) {
+        show(error instanceof Error ? error.message : "设置加载失败", "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [show],
+  );
 
   useEffect(() => {
     void load();
-  }, [section]);
+  }, [load]);
 
   async function save() {
     setSaving(true);
     try {
-      await api.savePreferences(form);
+      preferencesCache = {
+        ...defaults,
+        ...(await api.savePreferences(form)),
+      };
+      setForm(preferencesCache);
       show("设置已保存", "success");
     } catch (error) {
       show(error instanceof Error ? error.message : "保存失败", "error");
@@ -178,7 +205,10 @@ export default function SettingsPage({
         {...info}
         actions={
           <>
-            <Button icon={<ArrowSync20Regular />} onClick={load}>
+            <Button
+              icon={<ArrowSync20Regular />}
+              onClick={() => void load(true)}
+            >
               重新加载
             </Button>
             <Button
@@ -283,28 +313,12 @@ export default function SettingsPage({
                     <option value="large">宽松</option>
                   </Select>
                 </Field>
-                <Field label="桌面端文件点击">
-                  <Select
-                    value={form.fileClickMode}
-                    onChange={(event) =>
-                      set("fileClickMode", event.target.value)
-                    }
-                  >
-                    <option value="dbclick">双击打开</option>
-                    <option value="click">单击打开</option>
-                  </Select>
-                </Field>
-                <Field label="移动端文件点击">
-                  <Select
-                    value={form.mobileFileClickMode}
-                    onChange={(event) =>
-                      set("mobileFileClickMode", event.target.value)
-                    }
-                  >
-                    <option value="click">单击打开</option>
-                    <option value="dbclick">双击打开</option>
-                  </Select>
-                </Field>
+                <div className="interaction-rule-card span-2">
+                  <strong>文件点击规则</strong>
+                  <span>
+                    默认单击打开文件或文件夹；勾选任意项目后进入选择模式，单击项目将继续加入或取消选择。
+                  </span>
+                </div>
                 <ToggleField
                   title="根目录显示存储源"
                   detail="与 XFile 根目录的存储源入口行为一致"
@@ -318,22 +332,6 @@ export default function SettingsPage({
             <SettingGroup title="前台内容">
               <div className="form-grid">
                 <ToggleField
-                  title="显示文档入口"
-                  detail="在前台工具栏显示文档按钮"
-                  checked={form.showDocument === "enabled"}
-                  onChange={(value) =>
-                    set("showDocument", value ? "enabled" : "disabled")
-                  }
-                />
-                <ToggleField
-                  title="显示公告入口"
-                  detail="在前台工具栏显示公告按钮"
-                  checked={form.showAnnouncement === "enabled"}
-                  onChange={(value) =>
-                    set("showAnnouncement", value ? "enabled" : "disabled")
-                  }
-                />
-                <ToggleField
                   title="显示登录入口"
                   detail="允许访客从前台进入登录页"
                   checked={form.showLogin === "enabled"}
@@ -341,15 +339,6 @@ export default function SettingsPage({
                     set("showLogin", value ? "enabled" : "disabled")
                   }
                 />
-                <Field className="span-2" label="网站公告">
-                  <textarea
-                    value={form.announcement}
-                    onChange={(event) =>
-                      set("announcement", event.target.value)
-                    }
-                    rows={4}
-                  />
-                </Field>
               </div>
             </SettingGroup>
             <SettingGroup title="排序与加载">

@@ -3,6 +3,8 @@ import Shell from "./components/Shell";
 import { Loading } from "./components/ui";
 import { useApp } from "./state";
 import AccountsPage from "./pages/AccountsPage";
+import AboutPage from "./pages/AboutPage";
+import AnnouncementsPage from "./pages/AnnouncementsPage";
 import AuditPage from "./pages/AuditPage";
 import DeliveryPage from "./pages/DeliveryPage";
 import ExplorerPage from "./pages/ExplorerPage";
@@ -14,6 +16,7 @@ import SettingsPage from "./pages/SettingsPage";
 import SharePage from "./pages/SharePage";
 import SharesPage from "./pages/SharesPage";
 import StoragePage from "./pages/StoragePage";
+import ThemePage from "./pages/ThemePage";
 
 function HomeRoute() {
   const { session, loading } = useApp();
@@ -73,6 +76,7 @@ export default function App() {
         />
         <Route path="audit" element={<AuditPage />} />
         <Route path="insights" element={<InsightsPage />} />
+        <Route path="about" element={<AboutPage />} />
         <Route
           path="settings/site"
           element={
@@ -82,10 +86,26 @@ export default function App() {
           }
         />
         <Route
+          path="settings/theme"
+          element={
+            <AdminOnly>
+              <ThemePage />
+            </AdminOnly>
+          }
+        />
+        <Route
           path="settings/view"
           element={
             <AdminOnly>
               <SettingsPage section="view" />
+            </AdminOnly>
+          }
+        />
+        <Route
+          path="settings/announcement"
+          element={
+            <AdminOnly>
+              <AnnouncementsPage />
             </AdminOnly>
           }
         />

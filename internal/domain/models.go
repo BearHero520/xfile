@@ -10,6 +10,14 @@ type FileEntry struct {
 	MetadataUpdatedAt string `json:"metadataUpdatedAt,omitempty"`
 }
 
+type EntryDetails struct {
+	FileEntry
+	StorageKey  string `json:"storageKey"`
+	TotalSize   int64  `json:"totalSize"`
+	FileCount   int    `json:"fileCount"`
+	FolderCount int    `json:"folderCount"`
+}
+
 type FileMetadata struct {
 	StorageKey  string `json:"storageKey"`
 	Path        string `json:"path"`
@@ -45,44 +53,62 @@ type StorageSourceInput struct {
 }
 
 type PublicSite struct {
-	SiteName    string            `json:"siteName"`
-	RootName    string            `json:"rootName"`
-	Initialized bool              `json:"initialized"`
-	LoggedIn    bool              `json:"loggedIn"`
-	Sources     []StorageSource   `json:"sources"`
-	Preferences map[string]string `json:"preferences"`
+	SiteName      string            `json:"siteName"`
+	RootName      string            `json:"rootName"`
+	Initialized   bool              `json:"initialized"`
+	LoggedIn      bool              `json:"loggedIn"`
+	Sources       []StorageSource   `json:"sources"`
+	Announcements []Announcement    `json:"announcements"`
+	Preferences   map[string]string `json:"preferences"`
+}
+
+type Announcement struct {
+	ID        int64  `json:"id"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	Published bool   `json:"published"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+type AnnouncementInput struct {
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	Published bool   `json:"published"`
 }
 
 type Share struct {
-	ID            int64    `json:"id"`
-	Token         string   `json:"token"`
-	StorageKey    string   `json:"storageKey"`
-	Path          string   `json:"path"`
-	Paths         []string `json:"paths,omitempty"`
-	ItemCount     int      `json:"itemCount"`
-	URL           string   `json:"url"`
-	Protected     bool     `json:"protected"`
-	ExpiresAt     string   `json:"expiresAt,omitempty"`
-	ViewCount     int      `json:"viewCount"`
-	DownloadCount int      `json:"downloadCount"`
-	LastAccessAt  string   `json:"lastAccessAt,omitempty"`
-	CreatedAt     string   `json:"createdAt"`
+	ID             int64    `json:"id"`
+	Token          string   `json:"token"`
+	StorageKey     string   `json:"storageKey"`
+	Path           string   `json:"path"`
+	Paths          []string `json:"paths,omitempty"`
+	ItemCount      int      `json:"itemCount"`
+	URL            string   `json:"url"`
+	Protected      bool     `json:"protected"`
+	ExpiresAt      string   `json:"expiresAt,omitempty"`
+	MaxAccessCount int      `json:"maxAccessCount"`
+	ViewCount      int      `json:"viewCount"`
+	DownloadCount  int      `json:"downloadCount"`
+	LastAccessAt   string   `json:"lastAccessAt,omitempty"`
+	CreatedAt      string   `json:"createdAt"`
 }
 
 type ShareDetail struct {
-	Token       string      `json:"token"`
-	StorageKey  string      `json:"storageKey"`
-	Path        string      `json:"path"`
-	CurrentPath string      `json:"currentPath,omitempty"`
-	Name        string      `json:"name"`
-	Type        string      `json:"type"`
-	Size        int64       `json:"size"`
-	Description string      `json:"description,omitempty"`
-	Protected   bool        `json:"protected"`
-	ExpiresAt   string      `json:"expiresAt,omitempty"`
-	CreatedAt   string      `json:"createdAt"`
-	Files       []FileEntry `json:"files,omitempty"`
-	ItemCount   int         `json:"itemCount"`
+	Token          string      `json:"token"`
+	StorageKey     string      `json:"storageKey"`
+	Path           string      `json:"path"`
+	CurrentPath    string      `json:"currentPath,omitempty"`
+	Name           string      `json:"name"`
+	Type           string      `json:"type"`
+	Size           int64       `json:"size"`
+	Description    string      `json:"description,omitempty"`
+	Protected      bool        `json:"protected"`
+	ExpiresAt      string      `json:"expiresAt,omitempty"`
+	MaxAccessCount int         `json:"maxAccessCount"`
+	CreatedAt      string      `json:"createdAt"`
+	Files          []FileEntry `json:"files,omitempty"`
+	ItemCount      int         `json:"itemCount"`
 }
 
 type Favorite struct {

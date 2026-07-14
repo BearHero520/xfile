@@ -17,7 +17,7 @@ func TestNormalizeBatchSharePaths(t *testing.T) {
 		t.Fatalf("unexpected paths: %#v", paths)
 	}
 
-	for _, bad := range [][]string{nil, []string{""}, []string{"../secret.txt"}} {
+	for _, bad := range [][]string{nil, []string{""}, []string{"../secret.txt"}, []string{`..\secret.txt`}} {
 		if _, err := normalizeBatchSharePaths(bad); err == nil {
 			t.Fatalf("expected invalid paths to fail: %#v", bad)
 		}
@@ -39,7 +39,7 @@ func TestBatchCreateSharesRoute(t *testing.T) {
 		}
 	}
 
-	res := performJSONRequestAs(s, "root", http.MethodPost, "/api/v1/collaboration/shares/batch", `{"paths":["docs/a.txt","docs/b.txt"],"password":"secret"}`)
+	res := performJSONRequestAs(s, "root", http.MethodPost, "/api/v1/collaboration/shares/batch", `{"paths":["docs/a.txt","docs/b.txt"],"password":"secret","maxAccessCount":3}`)
 	if res.Code != http.StatusCreated {
 		t.Fatalf("batch share failed: %d %s", res.Code, res.Body.String())
 	}
@@ -51,7 +51,7 @@ func TestBatchCreateSharesRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("shares: %v", err)
 	}
-	if len(shares) != 1 || !shares[0].Protected || shares[0].ItemCount != 2 {
+	if len(shares) != 1 || !shares[0].Protected || shares[0].ItemCount != 2 || shares[0].MaxAccessCount != 3 {
 		t.Fatalf("unexpected shares: %#v", shares)
 	}
 	detail, err := appStore.ShareDetail(shares[0].Token, "secret", "")

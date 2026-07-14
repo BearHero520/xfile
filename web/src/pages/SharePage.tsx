@@ -194,6 +194,9 @@ export default function SharePage() {
                       ? `有效期至 ${formatTime(detail.expiresAt)}`
                       : "永久有效"}
                   </span>
+                  {detail.maxAccessCount > 0 && (
+                    <span>限 {detail.maxAccessCount} 次访问</span>
+                  )}
                 </div>
               </header>
               {detail.type === "file" ? (

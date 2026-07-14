@@ -33,7 +33,10 @@ type Store struct {
 	cfg config.Config
 }
 
-var ErrInvalidSharePassword = errors.New("invalid share password")
+var (
+	ErrInvalidSharePassword    = errors.New("invalid share password")
+	ErrShareAccessLimitReached = errors.New("分享访问次数已用完")
+)
 
 const sessionTokenBytes = 32
 
@@ -156,6 +159,10 @@ func (s *Store) Settings() (map[string]string, error) {
 	settings := map[string]string{
 		"siteName":                     s.cfg.SiteName,
 		"rootName":                     "首页",
+		"themePreset":                  "ocean",
+		"brandLogo":                    "",
+		"brandFavicon":                 "",
+		"brandingVersion":              "0",
 		"webdav":                       "disabled",
 		"webdavMountPath":              "/dav",
 		"webdavReadOnly":               "disabled",
@@ -213,7 +220,6 @@ func (s *Store) Settings() (map[string]string, error) {
 		"rootShowStorage":              "enabled",
 		"showDocument":                 "enabled",
 		"showAnnouncement":             "enabled",
-		"announcement":                 "",
 		"showLogin":                    "enabled",
 		"showLinkButton":               "enabled",
 		"showShortLink":                "enabled",
@@ -788,13 +794,22 @@ func (s *Store) PublicSite(loggedIn bool) (domain.PublicSite, error) {
 	if err != nil {
 		return domain.PublicSite{}, err
 	}
+	announcements, err := s.Announcements(true)
+	if err != nil {
+		return domain.PublicSite{}, err
+	}
 	return domain.PublicSite{
-		SiteName:    settings["siteName"],
-		RootName:    settings["rootName"],
-		Initialized: initialized,
-		LoggedIn:    loggedIn,
-		Sources:     sources,
+		SiteName:      settings["siteName"],
+		RootName:      settings["rootName"],
+		Initialized:   initialized,
+		LoggedIn:      loggedIn,
+		Sources:       sources,
+		Announcements: announcements,
 		Preferences: map[string]string{
+			"themePreset":                  settingOrDefault(settings, "themePreset", "ocean"),
+			"brandLogoUrl":                 publicBrandAssetURL(settings, "brandLogo", "logo"),
+			"brandFaviconUrl":              publicBrandAssetURL(settings, "brandFavicon", "favicon"),
+			"brandingVersion":              settingOrDefault(settings, "brandingVersion", "0"),
 			"layout":                       settingOrDefault(settings, "layout", "full"),
 			"mobileLayout":                 settingOrDefault(settings, "mobileLayout", "full"),
 			"tableSize":                    settingOrDefault(settings, "tableSize", "small"),
@@ -803,7 +818,6 @@ func (s *Store) PublicSite(loggedIn bool) (domain.PublicSite, error) {
 			"rootShowStorage":              settingOrDefault(settings, "rootShowStorage", "enabled"),
 			"showDocument":                 settingOrDefault(settings, "showDocument", "enabled"),
 			"showAnnouncement":             settingOrDefault(settings, "showAnnouncement", "enabled"),
-			"announcement":                 settings["announcement"],
 			"showLogin":                    settingOrDefault(settings, "showLogin", "enabled"),
 			"showLinkButton":               settingOrDefault(settings, "showLinkButton", "enabled"),
 			"showShortLink":                settingOrDefault(settings, "showShortLink", "enabled"),
@@ -820,6 +834,14 @@ func (s *Store) PublicSite(loggedIn bool) (domain.PublicSite, error) {
 			"externalPreviewTemplate":      settings["externalPreviewTemplate"],
 		},
 	}, nil
+}
+
+func publicBrandAssetURL(settings map[string]string, settingKey, assetName string) string {
+	if strings.TrimSpace(settings[settingKey]) == "" {
+		return ""
+	}
+	version := settingOrDefault(settings, "brandingVersion", "0")
+	return "/api/v1/public/branding/" + assetName + "?v=" + version
 }
 
 func settingOrDefault(settings map[string]string, key, fallback string) string {
@@ -2344,19 +2366,34 @@ func (s *Store) Dashboard() (domain.Dashboard, error) {
 }
 
 func (s *Store) CreateShare(path string, expiresAt string, password string) (domain.Share, error) {
-	return s.CreateSourceShare("local", path, expiresAt, password)
+	return s.CreateShareWithLimit(path, expiresAt, password, 0)
+}
+
+func (s *Store) CreateShareWithLimit(path string, expiresAt string, password string, maxAccessCount int) (domain.Share, error) {
+	return s.CreateSourceShareWithLimit("local", path, expiresAt, password, maxAccessCount)
 }
 
 func (s *Store) CreateShareWithToken(path string, expiresAt string, password string, token string) (domain.Share, error) {
-	return s.CreateSourceShareWithToken("local", path, expiresAt, password, token)
+	return s.CreateSourceShareWithTokenAndLimit("local", path, expiresAt, password, token, 0)
 }
 
 func (s *Store) CreateSourceShare(storageKey, path string, expiresAt string, password string) (domain.Share, error) {
-	return s.CreateSourceShareWithToken(storageKey, path, expiresAt, password, "")
+	return s.CreateSourceShareWithLimit(storageKey, path, expiresAt, password, 0)
+}
+
+func (s *Store) CreateSourceShareWithLimit(storageKey, path string, expiresAt string, password string, maxAccessCount int) (domain.Share, error) {
+	return s.CreateSourceShareWithTokenAndLimit(storageKey, path, expiresAt, password, "", maxAccessCount)
 }
 
 func (s *Store) CreateSourceShareWithToken(storageKey, path string, expiresAt string, password string, token string) (domain.Share, error) {
+	return s.CreateSourceShareWithTokenAndLimit(storageKey, path, expiresAt, password, token, 0)
+}
+
+func (s *Store) CreateSourceShareWithTokenAndLimit(storageKey, path string, expiresAt string, password string, token string, maxAccessCount int) (domain.Share, error) {
 	storageKey = storageKeyOrDefault(storageKey)
+	if maxAccessCount < 0 {
+		return domain.Share{}, errors.New("share max access count must be zero or greater")
+	}
 	path, err := cleanRelative(path)
 	if err != nil {
 		return domain.Share{}, err
@@ -2389,16 +2426,23 @@ func (s *Store) CreateSourceShareWithToken(storageKey, path string, expiresAt st
 	if err != nil {
 		return domain.Share{}, err
 	}
-	res, err := s.db.Exec(`INSERT INTO shares(token, storage_key, path, paths, password, expires_at) VALUES(?, ?, ?, ?, ?, ?)`, token, storageKey, path, string(encodedPaths), nullable(hashSharePassword(password)), nullable(expiresAt))
+	res, err := s.db.Exec(`INSERT INTO shares(token, storage_key, path, paths, password, expires_at, max_access_count) VALUES(?, ?, ?, ?, ?, ?, ?)`, token, storageKey, path, string(encodedPaths), nullable(hashSharePassword(password)), nullable(expiresAt), maxAccessCount)
 	if err != nil {
 		return domain.Share{}, err
 	}
 	id, _ := res.LastInsertId()
-	return domain.Share{ID: id, Token: token, StorageKey: storageKey, Path: path, Paths: []string{path}, ItemCount: 1, URL: "/share/" + token, Protected: strings.TrimSpace(password) != "", ExpiresAt: expiresAt, CreatedAt: time.Now().Format(time.RFC3339)}, nil
+	return domain.Share{ID: id, Token: token, StorageKey: storageKey, Path: path, Paths: []string{path}, ItemCount: 1, URL: "/share/" + token, Protected: strings.TrimSpace(password) != "", ExpiresAt: expiresAt, MaxAccessCount: maxAccessCount, CreatedAt: time.Now().Format(time.RFC3339)}, nil
 }
 
 func (s *Store) CreateSourceBundleShare(storageKey string, paths []string, expiresAt string, password string) (domain.Share, error) {
+	return s.CreateSourceBundleShareWithLimit(storageKey, paths, expiresAt, password, 0)
+}
+
+func (s *Store) CreateSourceBundleShareWithLimit(storageKey string, paths []string, expiresAt string, password string, maxAccessCount int) (domain.Share, error) {
 	storageKey = storageKeyOrDefault(storageKey)
+	if maxAccessCount < 0 {
+		return domain.Share{}, errors.New("share max access count must be zero or greater")
+	}
 	if len(paths) == 0 {
 		return domain.Share{}, errors.New("at least one share path is required")
 	}
@@ -2445,12 +2489,12 @@ func (s *Store) CreateSourceBundleShare(storageKey string, paths []string, expir
 	if err != nil {
 		return domain.Share{}, err
 	}
-	res, err := s.db.Exec(`INSERT INTO shares(token, storage_key, path, paths, password, expires_at) VALUES(?, ?, ?, ?, ?, ?)`, token, storageKey, cleanPaths[0], string(encodedPaths), nullable(hashSharePassword(password)), nullable(expiresAt))
+	res, err := s.db.Exec(`INSERT INTO shares(token, storage_key, path, paths, password, expires_at, max_access_count) VALUES(?, ?, ?, ?, ?, ?, ?)`, token, storageKey, cleanPaths[0], string(encodedPaths), nullable(hashSharePassword(password)), nullable(expiresAt), maxAccessCount)
 	if err != nil {
 		return domain.Share{}, err
 	}
 	id, _ := res.LastInsertId()
-	return domain.Share{ID: id, Token: token, StorageKey: storageKey, Path: cleanPaths[0], Paths: cleanPaths, ItemCount: len(cleanPaths), URL: "/share/" + token, Protected: strings.TrimSpace(password) != "", ExpiresAt: expiresAt, CreatedAt: time.Now().Format(time.RFC3339)}, nil
+	return domain.Share{ID: id, Token: token, StorageKey: storageKey, Path: cleanPaths[0], Paths: cleanPaths, ItemCount: len(cleanPaths), URL: "/share/" + token, Protected: strings.TrimSpace(password) != "", ExpiresAt: expiresAt, MaxAccessCount: maxAccessCount, CreatedAt: time.Now().Format(time.RFC3339)}, nil
 }
 
 func (s *Store) normalizeShareToken(value string) (string, error) {
@@ -2492,7 +2536,7 @@ func normalizeShareExpiresAt(value string) (string, error) {
 }
 
 func (s *Store) Shares() ([]domain.Share, error) {
-	rows, err := s.db.Query(`SELECT id, token, storage_key, path, COALESCE(paths, ''), COALESCE(password, ''), COALESCE(expires_at, ''), view_count, download_count, COALESCE(last_access_at, ''), created_at FROM shares ORDER BY created_at DESC LIMIT 50`)
+	rows, err := s.db.Query(`SELECT id, token, storage_key, path, COALESCE(paths, ''), COALESCE(password, ''), COALESCE(expires_at, ''), max_access_count, view_count, download_count, COALESCE(last_access_at, ''), created_at FROM shares ORDER BY created_at DESC LIMIT 50`)
 	if err != nil {
 		return nil, err
 	}
@@ -2501,7 +2545,7 @@ func (s *Store) Shares() ([]domain.Share, error) {
 	for rows.Next() {
 		var share domain.Share
 		var password, encodedPaths string
-		if err := rows.Scan(&share.ID, &share.Token, &share.StorageKey, &share.Path, &encodedPaths, &password, &share.ExpiresAt, &share.ViewCount, &share.DownloadCount, &share.LastAccessAt, &share.CreatedAt); err != nil {
+		if err := rows.Scan(&share.ID, &share.Token, &share.StorageKey, &share.Path, &encodedPaths, &password, &share.ExpiresAt, &share.MaxAccessCount, &share.ViewCount, &share.DownloadCount, &share.LastAccessAt, &share.CreatedAt); err != nil {
 			return nil, err
 		}
 		share.Paths = decodeSharePaths(encodedPaths, share.Path)
@@ -2518,6 +2562,31 @@ func (s *Store) DeleteShare(id int64) error {
 	return err
 }
 
+func (s *Store) UpdateShareLimits(id int64, expiresAt string, maxAccessCount int) (string, error) {
+	if id < 1 {
+		return "", errors.New("invalid share id")
+	}
+	if maxAccessCount < 0 {
+		return "", errors.New("share max access count must be zero or greater")
+	}
+	normalizedExpiresAt, err := normalizeShareExpiresAt(expiresAt)
+	if err != nil {
+		return "", err
+	}
+	res, err := s.db.Exec(`UPDATE shares SET expires_at = ?, max_access_count = ? WHERE id = ?`, nullable(normalizedExpiresAt), maxAccessCount, id)
+	if err != nil {
+		return "", err
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if updated == 0 {
+		return "", sql.ErrNoRows
+	}
+	return normalizedExpiresAt, nil
+}
+
 func (s *Store) DeleteExpiredShares() (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM shares WHERE expires_at IS NOT NULL AND expires_at != '' AND datetime(expires_at) <= CURRENT_TIMESTAMP`)
 	if err != nil {
@@ -2529,10 +2598,10 @@ func (s *Store) DeleteExpiredShares() (int64, error) {
 func (s *Store) ResolveShare(token string, password string) (domain.Share, error) {
 	var share domain.Share
 	var storedPassword, encodedPaths string
-	err := s.db.QueryRow(`SELECT id, token, storage_key, path, COALESCE(paths, ''), COALESCE(password, ''), COALESCE(expires_at, ''), view_count, download_count, COALESCE(last_access_at, ''), created_at
+	err := s.db.QueryRow(`SELECT id, token, storage_key, path, COALESCE(paths, ''), COALESCE(password, ''), COALESCE(expires_at, ''), max_access_count, view_count, download_count, COALESCE(last_access_at, ''), created_at
 		FROM shares
 		WHERE token = ? AND (expires_at IS NULL OR expires_at = '' OR datetime(expires_at) > CURRENT_TIMESTAMP)`, token).
-		Scan(&share.ID, &share.Token, &share.StorageKey, &share.Path, &encodedPaths, &storedPassword, &share.ExpiresAt, &share.ViewCount, &share.DownloadCount, &share.LastAccessAt, &share.CreatedAt)
+		Scan(&share.ID, &share.Token, &share.StorageKey, &share.Path, &encodedPaths, &storedPassword, &share.ExpiresAt, &share.MaxAccessCount, &share.ViewCount, &share.DownloadCount, &share.LastAccessAt, &share.CreatedAt)
 	if err != nil {
 		return domain.Share{}, err
 	}
@@ -2570,8 +2639,20 @@ func decodeSharePaths(value, fallback string) []string {
 }
 
 func (s *Store) RecordShareView(id int64) error {
-	_, err := s.db.Exec(`UPDATE shares SET view_count = view_count + 1, last_access_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
-	return err
+	res, err := s.db.Exec(`UPDATE shares
+		SET view_count = view_count + 1, last_access_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND (max_access_count <= 0 OR view_count < max_access_count)`, id)
+	if err != nil {
+		return err
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return ErrShareAccessLimitReached
+	}
+	return nil
 }
 
 func (s *Store) RecordShareDownload(id int64) error {
@@ -2604,19 +2685,20 @@ func (s *Store) ShareDetail(token string, password string, child string) (domain
 		files = s.applyFileListRules(fileListRuleContext{Source: source, PublicOnly: true}, files)
 	}
 	return domain.ShareDetail{
-		Token:       share.Token,
-		StorageKey:  share.StorageKey,
-		Path:        share.Path,
-		CurrentPath: currentRel,
-		Name:        entry.Name,
-		Type:        entry.Type,
-		Size:        entry.Size,
-		Description: entry.Description,
-		Protected:   share.Protected,
-		ExpiresAt:   share.ExpiresAt,
-		CreatedAt:   share.CreatedAt,
-		Files:       files,
-		ItemCount:   1,
+		Token:          share.Token,
+		StorageKey:     share.StorageKey,
+		Path:           share.Path,
+		CurrentPath:    currentRel,
+		Name:           entry.Name,
+		Type:           entry.Type,
+		Size:           entry.Size,
+		Description:    entry.Description,
+		Protected:      share.Protected,
+		ExpiresAt:      share.ExpiresAt,
+		MaxAccessCount: share.MaxAccessCount,
+		CreatedAt:      share.CreatedAt,
+		Files:          files,
+		ItemCount:      1,
 	}, nil
 }
 
@@ -2636,16 +2718,17 @@ func (s *Store) bundleShareDetail(share domain.Share, child string) (domain.Shar
 			files = append(files, entry)
 		}
 		return domain.ShareDetail{
-			Token:       share.Token,
-			StorageKey:  share.StorageKey,
-			Name:        strconv.Itoa(len(share.Paths)) + " 个项目",
-			Type:        "folder",
-			Description: "聚合分享",
-			Protected:   share.Protected,
-			ExpiresAt:   share.ExpiresAt,
-			CreatedAt:   share.CreatedAt,
-			Files:       files,
-			ItemCount:   len(share.Paths),
+			Token:          share.Token,
+			StorageKey:     share.StorageKey,
+			Name:           strconv.Itoa(len(share.Paths)) + " 个项目",
+			Type:           "folder",
+			Description:    "聚合分享",
+			Protected:      share.Protected,
+			ExpiresAt:      share.ExpiresAt,
+			MaxAccessCount: share.MaxAccessCount,
+			CreatedAt:      share.CreatedAt,
+			Files:          files,
+			ItemCount:      len(share.Paths),
 		}, nil
 	}
 
@@ -2675,18 +2758,19 @@ func (s *Store) bundleShareDetail(share domain.Share, child string) (domain.Shar
 		}
 	}
 	return domain.ShareDetail{
-		Token:       share.Token,
-		StorageKey:  share.StorageKey,
-		CurrentPath: cleanChild,
-		Name:        entry.Name,
-		Type:        entry.Type,
-		Size:        entry.Size,
-		Description: entry.Description,
-		Protected:   share.Protected,
-		ExpiresAt:   share.ExpiresAt,
-		CreatedAt:   share.CreatedAt,
-		Files:       files,
-		ItemCount:   len(share.Paths),
+		Token:          share.Token,
+		StorageKey:     share.StorageKey,
+		CurrentPath:    cleanChild,
+		Name:           entry.Name,
+		Type:           entry.Type,
+		Size:           entry.Size,
+		Description:    entry.Description,
+		Protected:      share.Protected,
+		ExpiresAt:      share.ExpiresAt,
+		MaxAccessCount: share.MaxAccessCount,
+		CreatedAt:      share.CreatedAt,
+		Files:          files,
+		ItemCount:      len(share.Paths),
 	}, nil
 }
 
@@ -2807,7 +2891,9 @@ func (s *Store) SharedFilePath(token, password, child string) (domain.Share, str
 
 func (s *Store) ShareCount() (int, error) {
 	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM shares WHERE expires_at IS NULL OR expires_at = '' OR datetime(expires_at) > CURRENT_TIMESTAMP`).Scan(&count)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM shares
+		WHERE (expires_at IS NULL OR expires_at = '' OR datetime(expires_at) > CURRENT_TIMESTAMP)
+			AND (max_access_count <= 0 OR view_count < max_access_count)`).Scan(&count)
 	return count, err
 }
 

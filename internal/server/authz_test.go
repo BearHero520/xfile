@@ -53,6 +53,7 @@ func TestSuperAdminOnlyManagementRoutes(t *testing.T) {
 		{name: "create storage source", method: http.MethodPost, target: "/api/v1/admin/storage-nodes", body: `{"name":"Alt","key":"alt","type":"local","rootPath":"` + filepath.ToSlash(t.TempDir()) + `","enabled":true}`},
 		{name: "list users", method: http.MethodGet, target: "/api/v1/admin/accounts"},
 		{name: "save settings", method: http.MethodPut, target: "/api/v1/preferences", body: `{"siteName":"Changed"}`},
+		{name: "list announcements", method: http.MethodGet, target: "/api/v1/admin/announcements"},
 		{name: "delete logs", method: http.MethodDelete, target: "/api/v1/audit/events?all=true"},
 	}
 	for _, tt := range tests {

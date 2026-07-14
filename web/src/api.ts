@@ -1,10 +1,14 @@
 import type {
   AccessLogPage,
   AccountInput,
+  AboutData,
+  AnnouncementEntry,
+  AnnouncementInput,
   AuthSession,
   CaptchaChallenge,
   Dashboard,
   DirectLinkEntry,
+  EntryDetails,
   FavoriteEntry,
   FileEntry,
   LinkAnalytics,
@@ -14,6 +18,7 @@ import type {
   ShareEntry,
   StorageSource,
   StorageSourceInput,
+  ThemeSettings,
   UserEntry,
 } from "./types";
 
@@ -23,12 +28,14 @@ type RequestOptions = RequestInit & {
 };
 
 export const endpoints = {
+  about: "/api/v1/system/about",
   publicBootstrap: "/api/v1/public/bootstrap",
   identityBootstrap: "/api/v1/identity/bootstrap",
   identitySession: "/api/v1/identity/session",
   identityChallenge: "/api/v1/identity/challenge",
   overview: "/api/v1/workspace/overview",
   entries: "/api/v1/workspace/entries",
+  entryDetails: "/api/v1/workspace/entries/details",
   search: "/api/v1/workspace/search",
   folders: "/api/v1/workspace/folders",
   documents: "/api/v1/workspace/documents",
@@ -46,6 +53,8 @@ export const endpoints = {
   audit: "/api/v1/audit/events",
   accounts: "/api/v1/admin/accounts",
   storageNodes: "/api/v1/admin/storage-nodes",
+  theme: "/api/v1/admin/theme",
+  announcements: "/api/v1/admin/announcements",
   preferences: "/api/v1/preferences",
 } as const;
 
@@ -131,6 +140,8 @@ export async function request<T>(
 }
 
 export const api = {
+  about: (refresh = false) =>
+    request<AboutData>(`${endpoints.about}${refresh ? "?refresh=1" : ""}`),
   site: () =>
     request<PublicSite>(endpoints.publicBootstrap, { skipAuthRedirect: true }),
   session: () =>
@@ -169,6 +180,23 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(value),
     }),
+  themeSettings: () => request<ThemeSettings>(endpoints.theme),
+  saveThemeSettings: (value: ThemeSettings) =>
+    request<ThemeSettings>(endpoints.theme, {
+      method: "PUT",
+      body: JSON.stringify(value),
+    }),
+  announcements: () => request<AnnouncementEntry[]>(endpoints.announcements),
+  saveAnnouncement: (value: AnnouncementInput, id?: number) =>
+    request<AnnouncementEntry>(
+      id ? `${endpoints.announcements}/${id}` : endpoints.announcements,
+      {
+        method: id ? "PATCH" : "POST",
+        body: JSON.stringify(value),
+      },
+    ),
+  deleteAnnouncement: (id: number) =>
+    request<void>(`${endpoints.announcements}/${id}`, { method: "DELETE" }),
   storageNodes: () => request<StorageSource[]>(endpoints.storageNodes),
   saveStorageNode: (input: StorageSourceInput, id?: number) =>
     request<StorageSource>(
@@ -182,9 +210,22 @@ export const api = {
     request<void>(`${endpoints.storageNodes}/${id}`, { method: "DELETE" }),
   entries: (storageKey: string, path = "") =>
     request<FileEntry[]>(`${endpoints.entries}?${query({ storageKey, path })}`),
+  entryDetails: (storageKey: string, path: string) =>
+    request<EntryDetails>(
+      `${endpoints.entryDetails}?${query({ storageKey, path })}`,
+    ),
   publicEntries: (storageKey: string, path = "", directoryPassword = "") =>
     request<FileEntry[]>(
       `/api/v1/public/drives/${encodeURIComponent(storageKey)}/entries?${query({ path, directoryPassword })}`,
+      { skipAuthRedirect: true },
+    ),
+  publicEntryDetails: (
+    storageKey: string,
+    path: string,
+    directoryPassword = "",
+  ) =>
+    request<EntryDetails>(
+      `/api/v1/public/drives/${encodeURIComponent(storageKey)}/entries/details?${query({ path, directoryPassword })}`,
       { skipAuthRedirect: true },
     ),
   search: (storageKey: string, q: string) =>
@@ -234,6 +275,7 @@ export const api = {
     path: string;
     password?: string;
     expiresAt?: string;
+    maxAccessCount?: number;
     customKey?: string;
   }) =>
     request<ShareEntry>(endpoints.shares, {
@@ -245,13 +287,28 @@ export const api = {
     paths: string[],
     password = "",
     expiresAt = "",
+    maxAccessCount = 0,
   ) =>
     request<ShareEntry>(`${endpoints.shares}/batch`, {
       method: "POST",
-      body: JSON.stringify({ storageKey, paths, password, expiresAt }),
+      body: JSON.stringify({
+        storageKey,
+        paths,
+        password,
+        expiresAt,
+        maxAccessCount,
+      }),
     }),
   deleteShare: (id: number) =>
     request<void>(`${endpoints.shares}/${id}`, { method: "DELETE" }),
+  updateShareLimits: (
+    id: number,
+    value: { expiresAt?: string; maxAccessCount: number },
+  ) =>
+    request<{ expiresAt?: string; maxAccessCount: number }>(
+      `${endpoints.shares}/${id}`,
+      { method: "PATCH", body: JSON.stringify(value) },
+    ),
   deleteExpiredShares: () =>
     request<{ deleted: number }>(`${endpoints.shares}/expired`, {
       method: "DELETE",
@@ -423,11 +480,22 @@ export function formatBytes(bytes: number) {
 
 export function formatTime(value?: string) {
   if (!value) return "—";
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
   return new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(value));
+  }).format(new Date(normalized));
+}
+
+export function timeValue(value?: string) {
+  if (!value) return Number.NaN;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  return new Date(normalized).getTime();
 }

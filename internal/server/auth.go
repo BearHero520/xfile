@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	sessionCookieName = "xfile_session"
-	csrfHeaderName    = "X-CSRF-Token"
+	sessionCookieName     = "xfile_session"
+	shareAccessCookieName = "xfile_share_access"
+	csrfHeaderName        = "X-CSRF-Token"
 )
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -399,6 +400,61 @@ func (s *Server) csrfTokenForRequest(r *http.Request) (string, bool) {
 func (s *Server) csrfToken(sessionValue string) string {
 	mac := hmac.New(sha256.New, []byte(s.sessionSecret))
 	mac.Write([]byte("csrf:" + sessionValue))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) setShareAccessCookie(w http.ResponseWriter, r *http.Request, share domain.Share) {
+	expires := time.Now().Add(24 * time.Hour)
+	if share.ExpiresAt != "" {
+		if shareExpiry, err := time.ParseInLocation("2006-01-02 15:04:05", share.ExpiresAt, time.UTC); err == nil && shareExpiry.Before(expires) {
+			expires = shareExpiry
+		}
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     shareAccessCookieName,
+		Value:    s.shareAccessValue(share.Token, expires),
+		Path:     "/api/v1/public/shares/" + share.Token,
+		MaxAge:   max(1, int(time.Until(expires).Seconds())),
+		Expires:  expires,
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (s *Server) hasShareAccess(r *http.Request, token string) bool {
+	cookie, err := r.Cookie(shareAccessCookieName)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(cookie.Value, ".")
+	if len(parts) != 2 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	values := strings.Split(string(payload), "\n")
+	if len(values) != 2 || values[0] != token {
+		return false
+	}
+	expiresUnix, err := strconv.ParseInt(values[1], 10, 64)
+	if err != nil || time.Now().Unix() >= expiresUnix {
+		return false
+	}
+	expected := s.shareAccessSignature(string(payload))
+	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expected)) == 1
+}
+
+func (s *Server) shareAccessValue(token string, expires time.Time) string {
+	payload := token + "\n" + strconv.FormatInt(expires.Unix(), 10)
+	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + s.shareAccessSignature(payload)
+}
+
+func (s *Server) shareAccessSignature(payload string) string {
+	mac := hmac.New(sha256.New, []byte(s.sessionSecret))
+	mac.Write([]byte("share-access:" + payload))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 

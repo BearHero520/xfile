@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -533,6 +534,47 @@ func TestSharePassword(t *testing.T) {
 	}
 	if resolved, err := s.ResolveShare(share.Token, "pass123"); err != nil || resolved.Path != "report.txt" {
 		t.Fatalf("resolve share = %#v, %v", resolved, err)
+	}
+}
+
+func TestShareAccessLimit(t *testing.T) {
+	s := newTestStore(t)
+	root, err := s.FilePath("")
+	if err != nil {
+		t.Fatalf("file root: %v", err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "report.txt"), []byte("report"), 0o644); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+
+	share, err := s.CreateShareWithLimit("report.txt", "", "", 1)
+	if err != nil {
+		t.Fatalf("create limited share: %v", err)
+	}
+	if share.MaxAccessCount != 1 {
+		t.Fatalf("max access count = %d, want 1", share.MaxAccessCount)
+	}
+	if err := s.RecordShareView(share.ID); err != nil {
+		t.Fatalf("record first access: %v", err)
+	}
+	if err := s.RecordShareView(share.ID); !errors.Is(err, ErrShareAccessLimitReached) {
+		t.Fatalf("second access error = %v, want limit reached", err)
+	}
+	shares, err := s.Shares()
+	if err != nil {
+		t.Fatalf("shares: %v", err)
+	}
+	if len(shares) != 1 || shares[0].ViewCount != 1 || shares[0].MaxAccessCount != 1 {
+		t.Fatalf("unexpected limited share: %#v", shares)
+	}
+	if count, err := s.ShareCount(); err != nil || count != 0 {
+		t.Fatalf("active share count = %d, %v; want 0", count, err)
+	}
+	if _, err := s.CreateShareWithLimit("report.txt", "", "", -1); err == nil {
+		t.Fatal("expected negative access limit to fail")
 	}
 }
 

@@ -1,4 +1,5 @@
 import type { AuthSession, PublicSite } from "./types";
+import { Dismiss16Regular } from "@fluentui/react-icons";
 import {
   createContext,
   useCallback,
@@ -18,6 +19,35 @@ interface AppState {
 
 const AppContext = createContext<AppState | null>(null);
 
+function applySiteBranding(site: PublicSite) {
+  const preset = site.preferences.themePreset || "ocean";
+  document.documentElement.dataset.brandTheme = preset;
+  document.title = site.siteName || "XFile";
+
+  const themeColors: Record<string, string> = {
+    ocean: "#087cf0",
+    violet: "#7c3aed",
+    emerald: "#059669",
+    sunset: "#ea580c",
+    graphite: "#475569",
+    sky: "#0891b2",
+    rose: "#db2777",
+    sunflower: "#d97706",
+  };
+  const themeColor = document.querySelector<HTMLMetaElement>(
+    'meta[name="theme-color"]',
+  );
+  if (themeColor) themeColor.content = themeColors[preset] || themeColors.ocean;
+
+  let favicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
+  if (!favicon) {
+    favicon = document.createElement("link");
+    favicon.rel = "icon";
+    document.head.appendChild(favicon);
+  }
+  favicon.href = site.preferences.brandFaviconUrl || "/favicon.svg";
+}
+
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [site, setSite] = useState<PublicSite | null>(null);
@@ -28,6 +58,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       api.session(),
       api.site(),
     ]);
+    applySiteBranding(nextSite);
     setSession(nextSession);
     setSite(nextSite);
   }, []);
@@ -35,6 +66,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     refresh().finally(() => setLoading(false));
   }, [refresh]);
+
+  useEffect(() => {
+    const syncSiteBranding = () => {
+      if (document.visibilityState === "hidden") return;
+      void api
+        .site()
+        .then((nextSite) => {
+          applySiteBranding(nextSite);
+          setSite(nextSite);
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener("focus", syncSiteBranding);
+    document.addEventListener("visibilitychange", syncSiteBranding);
+    return () => {
+      window.removeEventListener("focus", syncSiteBranding);
+      document.removeEventListener("visibilitychange", syncSiteBranding);
+    };
+  }, []);
 
   const value = useMemo(
     () => ({ session, site, loading, refresh }),
@@ -62,21 +112,31 @@ const ToastContext = createContext<ToastState | null>(null);
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
+  const dismiss = useCallback((id: number) => {
+    setItems((current) => current.filter((item) => item.id !== id));
+  }, []);
   const show = useCallback((message: string, kind: ToastKind = "info") => {
     const id = Date.now() + Math.random();
     setItems((current) => [...current, { id, message, kind }]);
-    window.setTimeout(
-      () => setItems((current) => current.filter((item) => item.id !== id)),
-      3200,
-    );
-  }, []);
+    window.setTimeout(() => dismiss(id), 3200);
+  }, [dismiss]);
   return (
     <ToastContext.Provider value={{ show }}>
       {children}
       <div className="toast-stack" aria-live="polite">
         {items.map((item) => (
           <div className={`toast toast-${item.kind}`} key={item.id}>
-            {item.message}
+            <span className="toast-message">{item.message}</span>
+            <button
+              type="button"
+              className="toast-close"
+              aria-label="关闭提示"
+              title="关闭提示"
+              onClick={() => dismiss(item.id)}
+            >
+              <Dismiss16Regular />
+              <span>关闭</span>
+            </button>
           </div>
         ))}
       </div>

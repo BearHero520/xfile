@@ -6,7 +6,7 @@ import {
   Link20Regular,
   Search20Regular,
 } from "@fluentui/react-icons";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, formatTime } from "../api";
 import {
   Badge,
@@ -19,27 +19,64 @@ import {
 } from "../components/ui";
 import { useToast } from "../state";
 
-export default function DeliveryPage() {
+let deliveryLinksCache: DirectLinkEntry[] | null = null;
+let deliveryLinksRequest: Promise<DirectLinkEntry[]> | null = null;
+
+function getDeliveryLinks() {
+  if (deliveryLinksRequest) return deliveryLinksRequest;
+
+  const request = api
+    .deliveryLinks()
+    .then((items) => {
+      deliveryLinksCache = items;
+      return items;
+    })
+    .finally(() => {
+      if (deliveryLinksRequest === request) deliveryLinksRequest = null;
+    });
+  deliveryLinksRequest = request;
+  return request;
+}
+
+export default function DeliveryPage({
+  embedded = false,
+}: {
+  embedded?: boolean;
+}) {
   const { show } = useToast();
-  const [items, setItems] = useState<DirectLinkEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [items, setItems] = useState<DirectLinkEntry[]>(
+    () => deliveryLinksCache || [],
+  );
+  const [loading, setLoading] = useState(() => deliveryLinksCache === null);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [removingIds, setRemovingIds] = useState<number[]>([]);
-  const load = async () => {
-    setLoading(true);
+  const load = useCallback(async (force = false) => {
+    if (force || !deliveryLinksCache) setLoading(true);
     setError("");
     try {
-      setItems(await api.deliveryLinks());
+      setItems(await getDeliveryLinks());
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "直链加载失败");
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const updateItems = useCallback(
+    (update: (current: DirectLinkEntry[]) => DirectLinkEntry[]) => {
+      setItems((current) => {
+        const next = update(current);
+        deliveryLinksCache = next;
+        return next;
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     if (!keyword) return items;
@@ -60,7 +97,7 @@ export default function DeliveryPage() {
   }
 
   async function toggle(item: DirectLinkEntry, enabled: boolean) {
-    setItems((current) =>
+    updateItems((current) =>
       current.map((entry) =>
         entry.id === item.id ? { ...entry, enabled } : entry,
       ),
@@ -68,7 +105,7 @@ export default function DeliveryPage() {
     try {
       await api.updateDeliveryLink(item.id, enabled);
     } catch (nextError) {
-      setItems((current) =>
+      updateItems((current) =>
         current.map((entry) =>
           entry.id === item.id ? { ...entry, enabled: item.enabled } : entry,
         ),
@@ -84,7 +121,7 @@ export default function DeliveryPage() {
     setRemovingIds((current) => [...current, item.id]);
     const request = api.deleteDeliveryLink(item.id);
     await exitDelay();
-    setItems((current) => current.filter((entry) => entry.id !== item.id));
+    updateItems((current) => current.filter((entry) => entry.id !== item.id));
     try {
       await request;
       show("直链已删除", "success");
@@ -93,7 +130,7 @@ export default function DeliveryPage() {
         nextError instanceof Error ? nextError.message : "删除失败",
         "error",
       );
-      await load();
+      await load(true);
     } finally {
       setRemovingIds((current) => current.filter((id) => id !== item.id));
     }
@@ -103,30 +140,38 @@ export default function DeliveryPage() {
       .writeText(`${location.origin}${item.url}`)
       .then(() => show("直链已复制", "success"));
   }
+  const headerActions = (
+    <>
+      <label className="resource-search">
+        <Search20Regular aria-hidden="true" />
+        <input
+          aria-label="查询短链"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="查询路径、存储源或令牌"
+        />
+      </label>
+      <Button icon={<ArrowSync20Regular />} onClick={() => void load(true)}>
+        刷新
+      </Button>
+    </>
+  );
   return (
-    <div className="page-stack">
-      <PageHeader
-        eyebrow="资源管理"
-        title="短链管理"
-        description="同一文件复用同一个稳定下载短链，并可随时停用或删除。"
-        actions={
-          <>
-            <label className="resource-search">
-              <Search20Regular aria-hidden="true" />
-              <input
-                aria-label="查询短链"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="查询路径、存储源或令牌"
-              />
-            </label>
-            <Button icon={<ArrowSync20Regular />} onClick={load}>
-              刷新
-            </Button>
-          </>
-        }
-      />
-      {error && <ErrorBanner error={error} onRetry={load} />}
+    <div className={`page-stack ${embedded ? "quick-manage-page" : ""}`}>
+      {embedded ? (
+        <div className="quick-manage-toolbar">
+          <p>快速启用、停用、复制或删除稳定下载短链。</p>
+          <div className="page-actions">{headerActions}</div>
+        </div>
+      ) : (
+        <PageHeader
+          eyebrow="资源管理"
+          title="短链管理"
+          description="同一文件复用同一个稳定下载短链，并可随时停用或删除。"
+          actions={headerActions}
+        />
+      )}
+      {error && <ErrorBanner error={error} onRetry={() => void load(true)} />}
       {loading ? (
         <Loading />
       ) : filtered.length === 0 ? (
